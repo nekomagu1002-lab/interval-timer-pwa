@@ -1,0 +1,20 @@
+{
+  "name": "Interval Timer",
+  "short_name": "Interval",
+  "description": "筋トレ・ストレッチ・HIIT向けのシンプルなインターバルタイマー",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#080d16",
+  "theme_color": "#111827",
+  "icons": [
+    {
+      "src": "./assets/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

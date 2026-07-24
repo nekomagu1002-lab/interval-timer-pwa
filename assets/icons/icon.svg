@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Interval Timer">
+  <rect width="512" height="512" rx="112" fill="#111827"/>
+  <circle cx="256" cy="276" r="154" fill="none" stroke="#38bdf8" stroke-width="34"/>
+  <path d="M210 62h92v42h-92z" fill="#f8fafc"/>
+  <path d="M256 276V166M256 276l78 58" fill="none" stroke="#f8fafc" stroke-linecap="round" stroke-width="32"/>
+  <circle cx="256" cy="276" r="20" fill="#fb7185"/>
+</svg>
