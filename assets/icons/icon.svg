@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Interval Timer">
-  <rect width="512" height="512" rx="112" fill="#111827"/>
-  <circle cx="256" cy="276" r="154" fill="none" stroke="#38bdf8" stroke-width="34"/>
-  <path d="M210 62h92v42h-92z" fill="#f8fafc"/>
-  <path d="M256 276V166M256 276l78 58" fill="none" stroke="#f8fafc" stroke-linecap="round" stroke-width="32"/>
-  <circle cx="256" cy="276" r="20" fill="#fb7185"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="筋トレ支援">
+  <rect width="512" height="512" rx="112" fill="#07101f"/>
+  <circle cx="256" cy="256" r="176" fill="#111d31" stroke="#24334d" stroke-width="10"/>
+  <path d="M126 215v82m48-112v142m164-142v142m48-112v82M126 256h260" fill="none" stroke="#f8fafc" stroke-linecap="round" stroke-width="34"/>
+  <path d="M222 216h68a28 28 0 0 1 28 28v24a28 28 0 0 1-28 28h-68a28 28 0 0 1-28-28v-24a28 28 0 0 1 28-28Z" fill="#21d4a7"/>
+  <path d="m244 238 34 18-34 18Z" fill="#07101f"/>
 </svg>

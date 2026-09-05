@@ -1,14 +1,14 @@
 {
-  "name": "Interval Timer",
-  "short_name": "Interval",
-  "description": "筋トレ・ストレッチ・HIIT向けのシンプルなインターバルタイマー",
+  "name": "筋トレ支援PWA",
+  "short_name": "筋トレ",
+  "description": "今日のメニュー作成から記録、タイマーまで端末内で完結する筋トレ支援PWA",
   "lang": "ja",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait",
-  "background_color": "#080d16",
-  "theme_color": "#111827",
+  "orientation": "portrait-primary",
+  "background_color": "#07101f",
+  "theme_color": "#07101f",
   "icons": [
     {
       "src": "./assets/icons/icon.svg",

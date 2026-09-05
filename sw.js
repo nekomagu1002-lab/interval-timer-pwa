@@ -1,12 +1,17 @@
 "use strict";
 
-const CACHE_NAME = "interval-timer-v0.2.0";
+const CACHE_NAME = "my-training-pwa-v1.0.0";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./css/styles.css",
   "./js/app.js",
+  "./js/audio.js",
+  "./js/data.js",
+  "./js/db.js",
+  "./js/generator.js",
+  "./js/timer.js",
   "./assets/icons/icon.svg",
 ];
 
@@ -22,9 +27,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(
-        keys
-          .filter((key) => key !== CACHE_NAME)
-          .map((key) => caches.delete(key)),
+        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)),
       ))
       .then(() => self.clients.claim()),
   );
@@ -37,23 +40,34 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
+          return response;
+        })
+        .catch(() => caches.match("./index.html")),
+    );
+    return;
+  }
+
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
+    caches.match(event.request).then((cached) => {
+      if (cached) {
+        return cached;
       }
 
-      return fetch(event.request)
-        .then((networkResponse) => {
-          if (!networkResponse || networkResponse.status !== 200) {
-            return networkResponse;
-          }
+      return fetch(event.request).then((response) => {
+        if (!response || response.status !== 200) {
+          return response;
+        }
 
-          const responseCopy = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseCopy));
-          return networkResponse;
-        })
-        .catch(() => caches.match("./index.html"));
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return response;
+      });
     }),
   );
 });

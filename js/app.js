@@ -1,367 +1,1104 @@
-"use strict";
+import { SoundManager, TONE_LABELS, VOLUME_LABELS } from "./audio.js";
+import {
+  deleteOne,
+  dumpDatabase,
+  initializeDatabase,
+  loadAppData,
+  putOne,
+  replaceDatabase,
+  saveAppState,
+} from "./db.js";
+import {
+  APP_VERSION,
+  DEFAULT_SETTINGS,
+  INTENSITIES,
+  MUSCLE_GROUPS,
+  createId,
+} from "./data.js";
+import {
+  formatSetSummary,
+  generatePlan,
+  getExerciseHistory,
+  isExerciseAvailable,
+  replacePlanItem,
+} from "./generator.js";
+import { PreciseCountdown, formatDuration } from "./timer.js";
 
-const STORAGE_KEY = "intervalTimerSettings";
-const DEFAULT_SETTINGS = Object.freeze({
-  workSeconds: 30,
-  restSeconds: 60,
-  sets: 3,
-  volume: "medium",
-  tone: "beep",
-});
-const VOLUME_LEVELS = Object.freeze({
-  mute: 0,
-  small: 0.08,
-  medium: 0.18,
-  large: 0.32,
-});
-const VOLUME_LABELS = Object.freeze({
-  mute: "消音",
-  small: "小",
-  medium: "中",
-  large: "大",
-});
-const TONE_LABELS = Object.freeze({
-  beep: "ビープ",
-  alarm: "アラーム",
-  bell: "ベル",
-});
-const LIMITS = Object.freeze({
-  workSeconds: { min: 5, max: 3600 },
-  restSeconds: { min: 5, max: 3600 },
-  sets: { min: 1, max: 99 },
-});
+const VALID_ROUTES = new Set([
+  "home",
+  "today",
+  "workout",
+  "history",
+  "exercises",
+  "equipment",
+  "timer",
+  "settings",
+]);
 
 const elements = {
-  app: document.querySelector("#app"),
-  status: document.querySelector("#status-label"),
-  time: document.querySelector("#time-display"),
-  set: document.querySelector("#set-display"),
-  workValue: document.querySelector("#work-value"),
-  restValue: document.querySelector("#rest-value"),
-  setsValue: document.querySelector("#sets-value"),
-  soundSettings: document.querySelector("#sound-settings"),
-  soundSummary: document.querySelector("#sound-setting-summary"),
-  soundButtons: [...document.querySelectorAll("[data-sound-setting]")],
-  previewButton: document.querySelector("#preview-button"),
-  wakeLockNotice: document.querySelector("#wake-lock-notice"),
-  startButton: document.querySelector("#start-button"),
-  pauseButton: document.querySelector("#pause-button"),
-  resetButton: document.querySelector("#reset-button"),
-  settingButtons: [...document.querySelectorAll("[data-setting]")],
+  view: document.querySelector("#app-view"),
+  todayLabel: document.querySelector("#today-label"),
+  sessionTimer: document.querySelector("#session-timer"),
+  sessionTimerLabel: document.querySelector("#session-timer-label"),
+  sessionTimerValue: document.querySelector("#session-timer-value"),
+  toast: document.querySelector("#toast"),
+  importFile: document.querySelector("#import-file"),
 };
 
 const state = {
-  settings: loadSettings(),
-  phase: "idle",
-  pausedPhase: null,
-  currentSet: 1,
-  remainingMs: 0,
-  endTime: 0,
-  timerId: null,
-  lastCountdownSecond: null,
-  audioContext: null,
+  initialized: false,
+  route: getRoute(),
+  settings: { id: "preferences", ...DEFAULT_SETTINGS },
+  equipment: [],
+  exercises: [],
+  workouts: [],
+  draftPlan: null,
+  activeWorkout: null,
+  exerciseFilter: "all",
+  sessionContext: null,
+  sessionLastSecond: null,
+  interval: {
+    phase: "idle",
+    pausedPhase: null,
+    currentSet: 1,
+    lastSecond: null,
+  },
   wakeLockSentinel: null,
   wakeLockSupported: "wakeLock" in navigator,
   wakeLockFailed: false,
-  wakeLockRequestPending: false,
+  wakeLockPending: false,
+  toastTimer: null,
 };
 
-const phaseLabels = {
-  idle: "待機中",
-  work: "運動中",
-  rest: "休憩中",
-  paused: "一時停止中",
-  complete: "完了",
-};
+const sound = new SoundManager(() => state.settings);
 
-function loadSettings() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return {
-      workSeconds: normalizeSetting("workSeconds", saved?.workSeconds),
-      restSeconds: normalizeSetting("restSeconds", saved?.restSeconds),
-      sets: normalizeSetting("sets", saved?.sets),
-      volume: normalizeSoundSetting("volume", saved?.volume),
-      tone: normalizeSoundSetting("tone", saved?.tone),
-    };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
-}
-
-function normalizeSetting(name, value) {
-  const fallback = DEFAULT_SETTINGS[name];
-  const numericValue = Number(value);
-  const { min, max } = LIMITS[name];
-
-  if (!Number.isFinite(numericValue)) {
-    return fallback;
-  }
-
-  const step = name === "sets" ? 1 : 5;
-  const steppedValue = Math.round(numericValue / step) * step;
-  return Math.min(max, Math.max(min, steppedValue));
-}
-
-function normalizeSoundSetting(name, value) {
-  const allowedValues = name === "volume" ? VOLUME_LEVELS : TONE_LABELS;
-  return Object.prototype.hasOwnProperty.call(allowedValues, value) ? value : DEFAULT_SETTINGS[name];
-}
-
-function saveSettings() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.settings));
-}
-
-function updateSoundSetting(name, value) {
-  if (state.phase !== "idle" && state.phase !== "complete") {
-    return;
-  }
-
-  state.settings[name] = normalizeSoundSetting(name, value);
-  saveSettings();
-  render();
-}
-
-function updateSetting(name, delta) {
-  if (state.phase !== "idle" && state.phase !== "complete") {
-    return;
-  }
-
-  state.settings[name] = normalizeSetting(name, state.settings[name] + delta);
-  saveSettings();
-
-  if (state.phase === "complete") {
-    resetTimer();
-  } else {
-    state.remainingMs = state.settings.workSeconds * 1000;
-    render();
-  }
-}
-
-async function startTimer() {
-  await unlockAudio();
-  saveSettings();
-  stopTicker();
-  state.currentSet = 1;
-  state.pausedPhase = null;
-  enterPhase("work", state.settings.workSeconds * 1000);
-  void requestWakeLock();
-  playPhaseTone("start");
-}
-
-function pauseTimer() {
-  if (state.phase === "paused") {
-    resumeTimer();
-    return;
-  }
-
-  if (state.phase !== "work" && state.phase !== "rest") {
-    return;
-  }
-
-  state.remainingMs = Math.max(0, state.endTime - Date.now());
-  state.pausedPhase = state.phase;
-  state.phase = "paused";
-  stopTicker();
-  render();
-}
-
-async function resumeTimer() {
-  await unlockAudio();
-
-  if (state.phase !== "paused" || !state.pausedPhase) {
-    return;
-  }
-
-  state.phase = state.pausedPhase;
-  state.pausedPhase = null;
-  state.endTime = Date.now() + state.remainingMs;
-  state.lastCountdownSecond = null;
-  startTicker();
-  tick();
-  void requestWakeLock();
-}
-
-function resetTimer() {
-  stopTicker();
-  void releaseWakeLock();
-  state.phase = "idle";
-  state.pausedPhase = null;
-  state.currentSet = 1;
-  state.remainingMs = state.settings.workSeconds * 1000;
-  state.endTime = 0;
-  state.lastCountdownSecond = null;
-  render();
-}
-
-function enterPhase(phase, durationMs, carryFromEndTime = null) {
-  state.phase = phase;
-  state.remainingMs = durationMs;
-  state.endTime = (carryFromEndTime ?? Date.now()) + durationMs;
-  state.lastCountdownSecond = null;
-  startTicker();
-  tick();
-}
-
-function advancePhase() {
-  const previousEndTime = state.endTime;
-
-  if (state.phase === "work") {
-    if (state.currentSet >= state.settings.sets) {
-      completeTimer();
-      return;
+const sessionCountdown = new PreciseCountdown({
+  onTick: ({ seconds }) => {
+    elements.sessionTimerValue.textContent = formatDuration(seconds);
+    if (seconds <= 3 && seconds > 0 && seconds !== state.sessionLastSecond) {
+      state.sessionLastSecond = seconds;
+      sound.play("countdown");
     }
+  },
+  onComplete: () => handleSessionTimerComplete(),
+  onStateChange: () => {
+    renderSessionTimer();
+    syncWakeLock();
+  },
+});
 
-    enterPhase("rest", state.settings.restSeconds * 1000, previousEndTime);
-    playPhaseTone("rest");
+const intervalCountdown = new PreciseCountdown({
+  onTick: ({ seconds }) => {
+    const display = document.querySelector("#interval-time");
+    if (display) {
+      display.textContent = formatDuration(seconds);
+    }
+    if (seconds <= 3 && seconds > 0 && seconds !== state.interval.lastSecond) {
+      state.interval.lastSecond = seconds;
+      sound.play("countdown");
+    }
+  },
+  onComplete: () => advanceInterval(),
+  onStateChange: () => syncWakeLock(),
+});
+
+function getRoute() {
+  const route = window.location.hash.replace(/^#\/?/, "").split("?")[0] || "home";
+  return VALID_ROUTES.has(route) ? route : "home";
+}
+
+function navigate(route) {
+  const safeRoute = VALID_ROUTES.has(route) ? route : "home";
+  if (getRoute() === safeRoute) {
+    state.route = safeRoute;
+    render();
     return;
   }
-
-  if (state.phase === "rest") {
-    state.currentSet += 1;
-    enterPhase("work", state.settings.workSeconds * 1000, previousEndTime);
-    playPhaseTone("work");
-  }
+  window.location.hash = `#/${safeRoute}`;
 }
 
-function completeTimer() {
-  stopTicker();
-  void releaseWakeLock();
-  state.phase = "complete";
-  state.pausedPhase = null;
-  state.currentSet = state.settings.sets;
-  state.remainingMs = 0;
-  state.endTime = 0;
-  state.lastCountdownSecond = null;
-  render();
-  playPhaseTone("complete");
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function tick() {
-  if (state.phase !== "work" && state.phase !== "rest") {
-    return;
+function formatDate(value, options = {}) {
+  if (!value) {
+    return "日時不明";
   }
-
-  state.remainingMs = Math.max(0, state.endTime - Date.now());
-
-  if (state.remainingMs <= 0) {
-    advancePhase();
-    return;
-  }
-
-  const secondsLeft = Math.ceil(state.remainingMs / 1000);
-  if (secondsLeft <= 3 && secondsLeft !== state.lastCountdownSecond) {
-    state.lastCountdownSecond = secondsLeft;
-    playCountdownTone();
-  }
-
-  render();
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "short",
+    day: "numeric",
+    weekday: "short",
+    ...options,
+  }).format(new Date(value));
 }
 
-function startTicker() {
-  stopTicker();
-  state.timerId = window.setInterval(tick, 100);
+function formatTime(value) {
+  return new Intl.DateTimeFormat("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
-function stopTicker() {
-  if (state.timerId !== null) {
-    window.clearInterval(state.timerId);
-    state.timerId = null;
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatWeight(value) {
+  const number = Number(value) || 0;
+  return Number.isInteger(number) ? String(number) : number.toFixed(1);
+}
+
+function equipmentName(id) {
+  return state.equipment.find((item) => item.id === id)?.name || id;
+}
+
+function showToast(message) {
+  window.clearTimeout(state.toastTimer);
+  elements.toast.textContent = message;
+  elements.toast.hidden = false;
+  state.toastTimer = window.setTimeout(() => {
+    elements.toast.hidden = true;
+  }, 2600);
+}
+
+async function initialize() {
+  try {
+    await initializeDatabase();
+    const data = await loadAppData();
+    state.settings = data.settings;
+    state.equipment = data.equipment;
+    state.exercises = data.exercises;
+    state.workouts = data.workouts;
+    state.draftPlan = data.appState.draftPlan || null;
+    state.activeWorkout = data.appState.activeWorkout || null;
+    state.initialized = true;
+    elements.todayLabel.textContent = new Intl.DateTimeFormat("ja-JP", {
+      month: "long",
+      day: "numeric",
+      weekday: "short",
+    }).format(new Date());
+    render();
+  } catch (error) {
+    console.error("App initialization failed:", error);
+    elements.view.innerHTML = `
+      <section class="empty-state">
+        <span class="empty-state__icon">!</span>
+        <h1>データを開けませんでした</h1>
+        <p>Safariのプライベートブラウズ設定や空き容量を確認して、ページを再読み込みしてください。</p>
+        <button class="primary-button" type="button" data-action="reload">再読み込み</button>
+      </section>
+    `;
   }
-}
-
-function formatTime(milliseconds) {
-  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function render() {
-  const controlsLocked = state.phase === "work" || state.phase === "rest" || state.phase === "paused";
-
-  elements.app.dataset.phase = state.phase === "paused" ? state.pausedPhase : state.phase;
-  elements.status.textContent = phaseLabels[state.phase];
-  elements.time.textContent = formatTime(state.remainingMs);
-  elements.time.setAttribute("aria-label", `残り${Math.ceil(state.remainingMs / 1000)}秒`);
-  elements.set.textContent = `${state.currentSet} / ${state.settings.sets} セット目`;
-  elements.workValue.textContent = state.settings.workSeconds;
-  elements.restValue.textContent = state.settings.restSeconds;
-  elements.setsValue.textContent = state.settings.sets;
-  elements.soundSummary.textContent = `${VOLUME_LABELS[state.settings.volume]}・${TONE_LABELS[state.settings.tone]}`;
-
-  elements.startButton.disabled = controlsLocked;
-  elements.startButton.textContent = state.phase === "complete" ? "もう一度" : "開始";
-  elements.pauseButton.disabled = state.phase !== "work" && state.phase !== "rest" && state.phase !== "paused";
-  elements.pauseButton.textContent = state.phase === "paused" ? "再開" : "一時停止";
-  elements.settingButtons.forEach((button) => {
-    button.disabled = controlsLocked;
-  });
-  elements.soundButtons.forEach((button) => {
-    button.disabled = controlsLocked;
-    button.setAttribute(
-      "aria-pressed",
-      String(state.settings[button.dataset.soundSetting] === button.dataset.value),
-    );
-  });
-  elements.previewButton.disabled = controlsLocked;
-  elements.soundSettings.dataset.locked = String(controlsLocked);
-  elements.wakeLockNotice.textContent = getWakeLockNotice();
-}
-
-function getWakeLockNotice() {
-  if (!isTimerActive()) {
-    return "画面を開いた状態でご利用ください";
-  }
-
-  if (state.wakeLockSupported && !state.wakeLockFailed && state.wakeLockSentinel) {
-    return "タイマー中は画面がスリープしないようにしています";
-  }
-
-  return "画面ロックを防止できません。画面を開いた状態でご利用ください";
-}
-
-function isTimerActive() {
-  return state.phase === "work" || state.phase === "rest" || state.phase === "paused";
-}
-
-async function requestWakeLock() {
-  if (
-    !state.wakeLockSupported
-    || state.wakeLockSentinel
-    || state.wakeLockRequestPending
-    || document.hidden
-    || !isTimerActive()
-  ) {
+  if (!state.initialized) {
     return;
   }
 
-  state.wakeLockFailed = false;
-  state.wakeLockRequestPending = true;
+  document.querySelectorAll("[data-route]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.route === state.route);
+  });
 
+  const views = {
+    home: renderHome,
+    today: renderToday,
+    workout: renderWorkout,
+    history: renderHistory,
+    exercises: renderExercises,
+    equipment: renderEquipment,
+    timer: renderIntervalTimer,
+    settings: renderSettings,
+  };
+
+  elements.view.innerHTML = views[state.route]();
+  elements.view.focus({ preventScroll: true });
+  renderSessionTimer();
+  syncWakeLock();
+}
+
+function pageHeader(eyebrow, title, description = "") {
+  return `
+    <header class="page-header">
+      <p class="eyebrow">${escapeHtml(eyebrow)}</p>
+      <h1>${escapeHtml(title)}</h1>
+      ${description ? `<p>${escapeHtml(description)}</p>` : ""}
+    </header>
+  `;
+}
+
+function renderHome() {
+  const enabledEquipment = state.equipment.filter((item) => item.enabled);
+  const lastWorkout = state.workouts[0];
+  const recentGroups = [...new Set(
+    state.workouts.slice(0, 3).flatMap((workout) => workout.items?.map((item) => item.muscleGroup) || []),
+  )].slice(0, 4);
+
+  return `
+    <section class="home-view">
+      ${state.activeWorkout ? `
+        <button class="resume-card" type="button" data-route="workout">
+          <span><small>進行中のトレーニング</small><strong>${escapeHtml(INTENSITIES[state.activeWorkout.intensity]?.label || "トレーニング")}</strong></span>
+          <span>続きから →</span>
+        </button>
+      ` : ""}
+
+      ${pageHeader("TODAY'S WORKOUT", "今日はどれくらいやる？", "体調と予定に近いものを選ぶだけで、今日のメニューを作ります。")}
+
+      <div class="intensity-grid">
+        ${Object.values(INTENSITIES).map((item) => `
+          <button class="intensity-card intensity-card--${item.accent}" type="button" data-action="generate-plan" data-intensity="${item.id}">
+            <span class="intensity-card__signal" aria-hidden="true">${item.id === "light" ? "●" : item.id === "normal" ? "●●" : "●●●"}</span>
+            <strong>${item.label}</strong>
+            <span>${item.durationLabel}</span>
+            <small>${item.subtitle}</small>
+          </button>
+        `).join("")}
+      </div>
+
+      <div class="dashboard-grid">
+        <article class="summary-card">
+          <span class="summary-card__label">使用できる器具</span>
+          <strong>${enabledEquipment.length}<small>種類</small></strong>
+          <button type="button" data-route="equipment">設定を見る</button>
+        </article>
+        <article class="summary-card">
+          <span class="summary-card__label">前回のトレーニング</span>
+          <strong class="summary-card__text">${lastWorkout ? escapeHtml(formatDate(lastWorkout.completedAt)) : "まだ記録なし"}</strong>
+          <span>${lastWorkout ? `${lastWorkout.items.length}種目・${INTENSITIES[lastWorkout.intensity]?.label}` : "最初のメニューを作りましょう"}</span>
+        </article>
+      </div>
+
+      ${recentGroups.length ? `
+        <section class="section-block compact-section">
+          <div class="section-heading"><div><p class="eyebrow">RECENT</p><h2>最近使った部位</h2></div></div>
+          <div class="chip-row">
+            ${recentGroups.map((id) => `<span class="muscle-chip" style="--chip-color:${MUSCLE_GROUPS[id]?.color}">${MUSCLE_GROUPS[id]?.label}</span>`).join("")}
+          </div>
+        </section>
+      ` : ""}
+
+      <section class="section-block">
+        <div class="section-heading"><div><p class="eyebrow">TOOLS</p><h2>管理とツール</h2></div></div>
+        <div class="quick-links">
+          <button type="button" data-route="exercises"><span>◆</span><strong>種目</strong><small>${state.exercises.filter((item) => item.enabled).length}件が有効</small></button>
+          <button type="button" data-route="equipment"><span>⌁</span><strong>器具</strong><small>使える器具を変更</small></button>
+          <button type="button" data-route="timer"><span>◴</span><strong>タイマー</strong><small>HIIT・ストレッチ</small></button>
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+function renderToday() {
+  if (!state.draftPlan) {
+    return `
+      ${pageHeader("TODAY", "今日のトレーニング")}
+      <section class="empty-state">
+        <span class="empty-state__icon">▤</span>
+        <h2>メニューはまだありません</h2>
+        <p>HOMEで今日の運動量を選ぶと、使用できる器具と最近の記録から提案します。</p>
+        <button class="primary-button" type="button" data-route="home">運動量を選ぶ</button>
+      </section>
+    `;
+  }
+
+  const config = INTENSITIES[state.draftPlan.intensity];
+  return `
+    <section>
+      <div class="plan-hero">
+        <div>
+          <p class="eyebrow">TODAY'S PLAN</p>
+          <div class="plan-hero__title"><h1>${config.label}メニュー</h1><span>${state.draftPlan.estimatedMinutes}分目安</span></div>
+          <p>${state.draftPlan.items.length}種目。直近の部位と種目を避けつつ、基本種目は継続しています。</p>
+        </div>
+        <button class="icon-button" type="button" data-action="regenerate-plan" aria-label="メニューを再生成">↻</button>
+      </div>
+
+      <ol class="plan-list">
+        ${state.draftPlan.items.map((item, index) => renderPlanItem(item, index)).join("")}
+      </ol>
+
+      <div class="sticky-action">
+        <button class="primary-button primary-button--large" type="button" data-action="start-workout">
+          トレーニングを開始 <span>→</span>
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderPlanItem(item, index) {
+  const group = MUSCLE_GROUPS[item.muscleGroup];
+  const target = item.type === "time" ? `${item.targetSeconds}秒` : `${item.targetReps}回`;
+  return `
+    <li class="plan-item">
+      <span class="plan-item__number">${String(index + 1).padStart(2, "0")}</span>
+      <div class="plan-item__main">
+        <div class="plan-item__title">
+          <span class="muscle-dot" style="--dot-color:${group.color}"></span>
+          <div><small>${group.label}</small><h2>${escapeHtml(item.name)}</h2></div>
+        </div>
+        <div class="plan-item__prescription">
+          <strong>${item.plannedSets}</strong><span>セット</span><i>×</i><strong>${target}</strong><span>休憩 ${item.restSeconds}秒</span>
+        </div>
+        <p class="plan-item__equipment">${item.equipment.map(equipmentName).map(escapeHtml).join("・")}</p>
+        <p class="plan-item__history">${item.previousSummary ? `前回 ${escapeHtml(item.previousSummary)}` : "初回の種目"}</p>
+      </div>
+      <button class="swap-button" type="button" data-action="replace-exercise" data-index="${index}">入替</button>
+    </li>
+  `;
+}
+
+function renderWorkout() {
+  if (!state.activeWorkout) {
+    return `
+      ${pageHeader("WORKOUT", "トレーニング実行")}
+      <section class="empty-state"><span class="empty-state__icon">▶</span><h2>進行中のトレーニングはありません</h2><p>今日のメニューを作成して開始してください。</p><button class="primary-button" type="button" data-route="today">今日のメニューへ</button></section>
+    `;
+  }
+
+  const workout = state.activeWorkout;
+  const index = Math.min(workout.currentExerciseIndex || 0, workout.items.length - 1);
+  const item = workout.items[index];
+  const group = MUSCLE_GROUPS[item.muscleGroup];
+  const histories = getExerciseHistory(item.exerciseId, state.workouts, 3);
+  const completed = workout.items.reduce((total, entry) => total + entry.sets.filter((set) => set.completed).length, 0);
+  const total = workout.items.reduce((sum, entry) => sum + entry.sets.length, 0);
+
+  return `
+    <section class="workout-view">
+      <header class="workout-progress">
+        <div><span>${index + 1} / ${workout.items.length} 種目</span><strong>${completed} / ${total} セット完了</strong></div>
+        <div class="progress-track"><span style="width:${total ? (completed / total) * 100 : 0}%"></span></div>
+      </header>
+
+      <article class="current-exercise" style="--group-color:${group.color}">
+        <span class="muscle-chip">${group.label}</span>
+        <h1>${escapeHtml(item.name)}</h1>
+        <p>${item.type === "time" ? `${item.targetSeconds}秒キープ` : `${item.targetReps}回を目安`} ・ セット間休憩 ${item.restSeconds}秒</p>
+        <small>${escapeHtml(item.progressionHint)}</small>
+      </article>
+
+      ${histories.length ? `
+        <details class="previous-records">
+          <summary>直近の記録を見る <span>${escapeHtml(formatSetSummary(histories[0].item))}</span></summary>
+          <div>${histories.map((history, historyIndex) => `<p><span>${historyIndex === 0 ? "前回" : `${historyIndex + 1}回前`}・${formatDate(history.completedAt)}</span><strong>${escapeHtml(formatSetSummary(history.item))}</strong></p>`).join("")}</div>
+        </details>
+      ` : `<p class="first-record-note">この種目は初回です。無理のない値から始めましょう。</p>`}
+
+      <div class="set-list">
+        ${item.sets.map((set, setIndex) => renderSetRow(item, index, set, setIndex)).join("")}
+      </div>
+
+      <div class="exercise-navigation">
+        <button type="button" data-action="change-exercise-index" data-delta="-1" ${index === 0 ? "disabled" : ""}>← 前の種目</button>
+        <button type="button" data-action="change-exercise-index" data-delta="1" ${index === workout.items.length - 1 ? "disabled" : ""}>次の種目 →</button>
+      </div>
+
+      <button class="finish-button" type="button" data-action="finish-workout">トレーニングを終了して保存</button>
+    </section>
+  `;
+}
+
+function renderSetRow(item, itemIndex, set, setIndex) {
+  if (item.type === "time") {
+    const timerActive = state.sessionContext?.kind === "work"
+      && state.sessionContext.itemIndex === itemIndex
+      && state.sessionContext.setIndex === setIndex;
+    return `
+      <article class="set-row ${set.completed ? "is-complete" : ""}">
+        <span class="set-row__number">${setIndex + 1}</span>
+        <div class="set-row__time"><strong>${set.durationSeconds || item.targetSeconds}</strong><span>秒</span></div>
+        <button class="set-timer-button" type="button" data-action="start-set-timer" data-item-index="${itemIndex}" data-set-index="${setIndex}" ${set.completed || timerActive ? "disabled" : ""}>${timerActive ? "計測中" : "タイマー開始"}</button>
+        <button class="complete-set-button ${set.completed ? "is-complete" : ""}" type="button" data-action="toggle-set-complete" data-item-index="${itemIndex}" data-set-index="${setIndex}">${set.completed ? "✓ 完了" : "完了"}</button>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="set-row ${set.completed ? "is-complete" : ""}">
+      <span class="set-row__number">${setIndex + 1}</span>
+      <div class="record-stepper">
+        <span>重量</span>
+        <div><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="weight" data-delta="-0.5" ${set.completed ? "disabled" : ""}>−</button><strong>${formatWeight(set.weight)}</strong><small>kg</small><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="weight" data-delta="0.5" ${set.completed ? "disabled" : ""}>＋</button></div>
+      </div>
+      <div class="record-stepper">
+        <span>回数</span>
+        <div><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="reps" data-delta="-1" ${set.completed ? "disabled" : ""}>−</button><strong>${set.reps}</strong><small>回</small><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="reps" data-delta="1" ${set.completed ? "disabled" : ""}>＋</button></div>
+      </div>
+      <button class="complete-set-button ${set.completed ? "is-complete" : ""}" type="button" data-action="toggle-set-complete" data-item-index="${itemIndex}" data-set-index="${setIndex}">${set.completed ? "✓" : "完了"}</button>
+    </article>
+  `;
+}
+
+function renderHistory() {
+  return `
+    <section>
+      ${pageHeader("HISTORY", "トレーニング履歴", "端末内に保存した記録です。新しいものから表示します。")}
+      ${state.workouts.length ? `
+        <div class="history-list">
+          ${state.workouts.map((workout) => {
+            const totalSets = workout.items.reduce((sum, item) => sum + item.sets.filter((set) => set.completed).length, 0);
+            return `
+              <details class="history-card">
+                <summary>
+                  <span class="history-card__date"><strong>${formatDate(workout.completedAt)}</strong><small>${formatTime(workout.completedAt)}</small></span>
+                  <span class="intensity-badge intensity-badge--${workout.intensity}">${INTENSITIES[workout.intensity]?.label || "記録"}</span>
+                  <span class="history-card__summary">${workout.items.length}種目・${totalSets}セット</span>
+                  <span class="history-card__chevron">⌄</span>
+                </summary>
+                <div class="history-card__body">
+                  ${workout.items.map((item) => `
+                    <div><span><i style="background:${MUSCLE_GROUPS[item.muscleGroup]?.color}"></i>${escapeHtml(item.name)}</span><strong>${escapeHtml(formatSetSummary(item))}</strong></div>
+                  `).join("")}
+                </div>
+              </details>
+            `;
+          }).join("")}
+        </div>
+      ` : `<section class="empty-state"><span class="empty-state__icon">◷</span><h2>履歴はまだありません</h2><p>トレーニングを終了すると、重量・回数・セットがここへ保存されます。</p><button class="primary-button" type="button" data-route="home">今日のメニューを作る</button></section>`}
+    </section>
+  `;
+}
+
+function renderExercises() {
+  const filtered = state.exercises.filter((exercise) => (
+    state.exerciseFilter === "all" || exercise.muscleGroup === state.exerciseFilter
+  ));
+  return `
+    <section>
+      ${pageHeader("EXERCISES", "種目", "提案に使う種目をON/OFFできます。自分用の種目も追加できます。")}
+      <div class="filter-scroll">
+        <button class="filter-chip ${state.exerciseFilter === "all" ? "is-active" : ""}" type="button" data-action="filter-exercises" data-group="all">すべて</button>
+        ${Object.entries(MUSCLE_GROUPS).map(([id, group]) => `<button class="filter-chip ${state.exerciseFilter === id ? "is-active" : ""}" type="button" data-action="filter-exercises" data-group="${id}">${group.label}</button>`).join("")}
+      </div>
+      <div class="catalog-list">
+        ${filtered.map((exercise) => {
+          const histories = getExerciseHistory(exercise.id, state.workouts, 5);
+          return `
+            <article class="catalog-card ${exercise.enabled ? "" : "is-disabled"}">
+              <span class="muscle-dot" style="--dot-color:${MUSCLE_GROUPS[exercise.muscleGroup]?.color}"></span>
+              <div><small>${MUSCLE_GROUPS[exercise.muscleGroup]?.label}・${exercise.type === "time" ? `${exercise.defaultSeconds}秒` : `${exercise.defaultReps}回`}・${exercise.defaultSets}セット</small><h2>${escapeHtml(exercise.name)}</h2><p>${exercise.equipment.map(equipmentName).map(escapeHtml).join("・")} / 休憩${exercise.restSeconds}秒</p></div>
+              <button class="toggle-button ${exercise.enabled ? "is-on" : ""}" type="button" data-action="toggle-exercise" data-id="${escapeHtml(exercise.id)}" aria-pressed="${exercise.enabled}">${exercise.enabled ? "ON" : "OFF"}</button>
+              ${exercise.builtIn ? "" : `<button class="delete-button" type="button" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}" aria-label="${escapeHtml(exercise.name)}を削除">×</button>`}
+              ${histories.length ? `
+                <details class="catalog-history">
+                  <summary>直近${histories.length}回の記録</summary>
+                  <div>${histories.map(({ completedAt, item }) => `<p><span>${formatDate(completedAt)}</span><strong>${escapeHtml(formatSetSummary(item))}</strong></p>`).join("")}</div>
+                </details>
+              ` : ""}
+            </article>
+          `;
+        }).join("")}
+      </div>
+      ${renderExerciseForm()}
+    </section>
+  `;
+}
+
+function renderExerciseForm() {
+  return `
+    <details class="add-panel">
+      <summary>＋ 自分用の種目を追加</summary>
+      <form id="exercise-form" class="form-grid">
+        <label class="field field--wide"><span>種目名</span><input name="name" required maxlength="40" placeholder="例：ブルガリアンスクワット"></label>
+        <label class="field"><span>対象部位</span><select name="muscleGroup">${Object.entries(MUSCLE_GROUPS).map(([id, group]) => `<option value="${id}">${group.label}</option>`).join("")}</select></label>
+        <label class="field"><span>必要器具</span><select name="equipment">${state.equipment.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("")}</select></label>
+        <label class="field"><span>種類</span><select name="type"><option value="reps">回数</option><option value="time">時間</option></select></label>
+        <label class="field"><span>基準回数／秒</span><input name="target" type="number" inputmode="numeric" min="1" max="999" value="10" required></label>
+        <label class="field"><span>標準セット</span><input name="sets" type="number" inputmode="numeric" min="2" max="4" value="3" required></label>
+        <label class="field"><span>休憩（秒）</span><input name="rest" type="number" inputmode="numeric" min="0" max="600" step="5" value="60" required></label>
+        <button class="primary-button field--wide" type="submit">種目を追加</button>
+      </form>
+    </details>
+  `;
+}
+
+function renderEquipment() {
+  return `
+    <section>
+      ${pageHeader("EQUIPMENT", "使用器具", "ONになっている器具だけで、今日のメニューを作ります。")}
+      <div class="equipment-list">
+        ${state.equipment.map((item) => `
+          <article class="equipment-card ${item.enabled ? "is-enabled" : ""}">
+            <span class="equipment-card__icon">${item.id === "bodyweight" ? "人" : "＋"}</span>
+            <div><h2>${escapeHtml(item.name)}</h2><p>${item.enabled ? "メニュー生成に使用" : "現在は使用しない"}</p></div>
+            <button class="switch" type="button" data-action="toggle-equipment" data-id="${escapeHtml(item.id)}" aria-pressed="${item.enabled}"><span></span></button>
+            ${item.builtIn ? "" : `<button class="delete-button" type="button" data-action="delete-equipment" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name)}を削除">×</button>`}
+          </article>
+        `).join("")}
+      </div>
+      <form id="equipment-form" class="inline-form">
+        <label class="field"><span>器具を追加</span><input name="name" required maxlength="30" placeholder="例：ケトルベル"></label>
+        <button class="secondary-button" type="submit">追加</button>
+      </form>
+      <p class="helper-text">追加した器具は削除できます。既定の器具はOFFにして候補から外せます。</p>
+    </section>
+  `;
+}
+
+function renderIntervalTimer() {
+  const phaseLabels = { idle: "待機中", work: "運動中", rest: "休憩中", paused: "一時停止中", complete: "完了" };
+  const displaySeconds = state.interval.phase === "idle"
+    ? state.settings.intervalWorkSeconds
+    : state.interval.phase === "complete"
+      ? 0
+      : Math.ceil(intervalCountdown.remainingMs / 1000);
+  const locked = ["work", "rest", "paused"].includes(state.interval.phase);
+  return `
+    <section class="timer-view" data-phase="${state.interval.phase === "paused" ? state.interval.pausedPhase : state.interval.phase}">
+      ${pageHeader("INTERVAL TIMER", "インターバルタイマー", "HIIT、プランク、ストレッチなどに。")}
+      <article class="interval-display">
+        <span id="interval-status">${phaseLabels[state.interval.phase]}</span>
+        <strong id="interval-time">${formatDuration(displaySeconds)}</strong>
+        <p>${state.interval.currentSet} / ${state.settings.intervalSets} セット目</p>
+      </article>
+      <div class="timer-settings">
+        ${renderTimerSetting("運動", "intervalWorkSeconds", state.settings.intervalWorkSeconds, 5, "秒", locked)}
+        ${renderTimerSetting("休憩", "intervalRestSeconds", state.settings.intervalRestSeconds, 5, "秒", locked)}
+        ${renderTimerSetting("セット", "intervalSets", state.settings.intervalSets, 1, "回", locked)}
+      </div>
+      <div class="timer-controls">
+        <button class="primary-button" type="button" data-action="interval-start" ${locked ? "disabled" : ""}>${state.interval.phase === "complete" ? "もう一度" : "開始"}</button>
+        <button class="secondary-button" type="button" data-action="interval-toggle" ${locked ? "" : "disabled"}>${state.interval.phase === "paused" ? "再開" : "一時停止"}</button>
+        <button class="text-button" type="button" data-action="interval-reset">リセット</button>
+      </div>
+      <button class="sound-link" type="button" data-route="settings">音量 ${VOLUME_LABELS[state.settings.volume]} ・ ${TONE_LABELS[state.settings.tone]} <span>設定 →</span></button>
+      <p class="wake-note" id="wake-note">${wakeLockMessage()}</p>
+    </section>
+  `;
+}
+
+function renderTimerSetting(label, key, value, step, unit, locked) {
+  return `
+    <div><span><strong>${label}</strong><small>${unit}</small></span><div><button type="button" data-action="adjust-interval-setting" data-key="${key}" data-delta="-${step}" ${locked ? "disabled" : ""}>−</button><output>${value}</output><button type="button" data-action="adjust-interval-setting" data-key="${key}" data-delta="${step}" ${locked ? "disabled" : ""}>＋</button></div></div>
+  `;
+}
+
+function renderSettings() {
+  const soundLocked = ["work", "rest", "paused"].includes(state.interval.phase)
+    || ["running", "paused"].includes(sessionCountdown.status);
+  return `
+    <section>
+      ${pageHeader("SETTINGS", "設定", "通知音と端末内データを管理します。")}
+      <section class="settings-card">
+        <div class="settings-card__heading"><div><p class="eyebrow">SOUND</p><h2>通知音</h2></div><button class="preview-sound" type="button" data-action="preview-sound" ${soundLocked ? "disabled" : ""}>試聴</button></div>
+        <div class="option-group"><span>音量</span><div class="segmented segmented--four">${Object.entries(VOLUME_LABELS).map(([id, label]) => `<button type="button" data-action="set-sound" data-key="volume" data-value="${id}" class="${state.settings.volume === id ? "is-selected" : ""}" ${soundLocked ? "disabled" : ""}>${label}</button>`).join("")}</div></div>
+        <div class="option-group"><span>音色</span><div class="segmented segmented--three">${Object.entries(TONE_LABELS).map(([id, label]) => `<button type="button" data-action="set-sound" data-key="tone" data-value="${id}" class="${state.settings.tone === id ? "is-selected" : ""}" ${soundLocked ? "disabled" : ""}>${label}</button>`).join("")}</div></div>
+        <p class="helper-text">${soundLocked ? "タイマー動作中は音設定を変更できません。" : "実際の音量はiPhone本体のメディア音量にも影響されます。"}</p>
+      </section>
+
+      <section class="settings-card">
+        <div class="settings-card__heading"><div><p class="eyebrow">MY DATA</p><h2>バックアップ</h2></div></div>
+        <p>器具、種目、設定、履歴、進行中の内容をひとつのJSONファイルに保存できます。</p>
+        <div class="settings-actions"><button class="secondary-button" type="button" data-action="export-data">JSONを書き出す</button><button class="secondary-button" type="button" data-action="choose-import">JSONを読み込む</button></div>
+        <p class="helper-text">インポートすると、現在の端末内データをバックアップ内容で置き換えます。</p>
+      </section>
+
+      <section class="settings-card settings-links">
+        <button type="button" data-route="equipment"><span>使用器具</span><strong>${state.equipment.filter((item) => item.enabled).length}種類が有効 →</strong></button>
+        <button type="button" data-route="exercises"><span>種目マスター</span><strong>${state.exercises.filter((item) => item.enabled).length}種目が有効 →</strong></button>
+      </section>
+
+      <section class="about-card">
+        <div><strong>筋トレ支援PWA</strong><span>v${APP_VERSION}</span></div>
+        <p>データはこの端末内のIndexedDBにだけ保存されます。アカウントや外部APIは使用しません。</p>
+        <p>${state.wakeLockSupported ? "画面スリープ防止に対応しています。" : "この環境では画面スリープ防止を利用できません。"}</p>
+      </section>
+    </section>
+  `;
+}
+
+async function createPlan(intensity) {
+  const plan = generatePlan({
+    intensity,
+    equipment: state.equipment,
+    exercises: state.exercises,
+    workouts: state.workouts,
+    nonce: Date.now(),
+  });
+
+  if (!plan) {
+    showToast("使用できる種目がありません。器具と種目の設定を確認してください。 ");
+    return;
+  }
+
+  state.draftPlan = plan;
+  await saveAppState("draftPlan", plan);
+  navigate("today");
+}
+
+async function regeneratePlan() {
+  if (!state.draftPlan) {
+    return;
+  }
+  await createPlan(state.draftPlan.intensity);
+}
+
+async function replaceExercise(index) {
+  const plan = replacePlanItem({
+    plan: state.draftPlan,
+    itemIndex: index,
+    equipment: state.equipment,
+    exercises: state.exercises,
+    workouts: state.workouts,
+  });
+
+  if (!plan) {
+    showToast("同じ部位で交換できる種目がありません。 ");
+    return;
+  }
+
+  state.draftPlan = plan;
+  await saveAppState("draftPlan", plan);
+  render();
+  showToast("種目を入れ替えました");
+}
+
+async function startWorkout() {
+  if (!state.draftPlan || state.draftPlan.items.length === 0) {
+    return;
+  }
+  if (state.activeWorkout && !window.confirm("進行中のトレーニングを破棄して、このメニューを開始しますか？")) {
+    return;
+  }
+  await sound.unlock();
+  state.activeWorkout = {
+    id: createId("workout"),
+    date: localDateKey(),
+    intensity: state.draftPlan.intensity,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    currentExerciseIndex: 0,
+    items: state.draftPlan.items.map((item) => ({
+      ...item,
+      sets: Array.from({ length: item.plannedSets }, () => ({
+        weight: Number(item.suggestedWeight) || 0,
+        reps: item.type === "reps" ? item.targetReps : null,
+        durationSeconds: item.type === "time" ? item.targetSeconds : null,
+        completed: false,
+      })),
+    })),
+  };
+  await saveActiveWorkout();
+  sound.play("start");
+  navigate("workout");
+}
+
+async function saveActiveWorkout() {
+  await saveAppState("activeWorkout", state.activeWorkout);
+}
+
+async function adjustRecord(button) {
+  const item = state.activeWorkout?.items[Number(button.dataset.itemIndex)];
+  const set = item?.sets[Number(button.dataset.setIndex)];
+  if (!set || set.completed) {
+    return;
+  }
+  const field = button.dataset.field;
+  const delta = Number(button.dataset.delta);
+  const nextValue = Math.max(0, (Number(set[field]) || 0) + delta);
+  set[field] = field === "weight" ? Math.round(nextValue * 2) / 2 : Math.round(nextValue);
+  await saveActiveWorkout();
+  render();
+}
+
+async function toggleSetComplete(button) {
+  const itemIndex = Number(button.dataset.itemIndex);
+  const setIndex = Number(button.dataset.setIndex);
+  const item = state.activeWorkout?.items[itemIndex];
+  const set = item?.sets[setIndex];
+  if (!set) {
+    return;
+  }
+
+  await sound.unlock();
+  set.completed = !set.completed;
+  await saveActiveWorkout();
+
+  if (set.completed) {
+    const timingThisSet = state.sessionContext?.kind === "work"
+      && state.sessionContext.itemIndex === itemIndex
+      && state.sessionContext.setIndex === setIndex;
+    if (timingThisSet) {
+      stopSessionTimer();
+    }
+    const shouldRest = setIndex < item.sets.length - 1 && item.restSeconds > 0;
+    sound.play(shouldRest ? "rest" : "work");
+    if (shouldRest) {
+      startSessionTimer("rest", item.restSeconds, { itemIndex, setIndex });
+    }
+  } else if (state.sessionContext?.itemIndex === itemIndex && state.sessionContext?.setIndex === setIndex) {
+    stopSessionTimer();
+  }
+  render();
+}
+
+async function startTimedSet(button) {
+  const itemIndex = Number(button.dataset.itemIndex);
+  const setIndex = Number(button.dataset.setIndex);
+  const item = state.activeWorkout?.items[itemIndex];
+  const set = item?.sets[setIndex];
+  if (!item || !set || set.completed) {
+    return;
+  }
+  await sound.unlock();
+  sound.play("work");
+  startSessionTimer("work", set.durationSeconds || item.targetSeconds, { itemIndex, setIndex });
+  render();
+}
+
+function startSessionTimer(kind, seconds, context = {}) {
+  // `kind` must win when reusing a completed work-timer context for its rest phase.
+  state.sessionContext = { ...context, kind };
+  state.sessionLastSecond = null;
+  sessionCountdown.start(seconds);
+  renderSessionTimer();
+}
+
+function stopSessionTimer() {
+  sessionCountdown.stop();
+  state.sessionContext = null;
+  state.sessionLastSecond = null;
+  renderSessionTimer();
+}
+
+async function handleSessionTimerComplete() {
+  const context = state.sessionContext;
+  state.sessionContext = null;
+  state.sessionLastSecond = null;
+
+  if (context?.kind === "work") {
+    const item = state.activeWorkout?.items[context.itemIndex];
+    const set = item?.sets[context.setIndex];
+    if (set) {
+      set.completed = true;
+      await saveActiveWorkout();
+      if (context.setIndex < item.sets.length - 1 && item.restSeconds > 0) {
+        sound.play("rest");
+        startSessionTimer("rest", item.restSeconds, context);
+      } else {
+        sound.play("work");
+        showToast("セット完了。次へ進めます");
+      }
+    }
+  } else if (context?.kind === "rest") {
+    sound.play("work");
+    showToast("休憩終了。次のセットです");
+  }
+
+  render();
+}
+
+function renderSessionTimer() {
+  const context = state.sessionContext;
+  const active = context && ["running", "paused"].includes(sessionCountdown.status);
+  elements.sessionTimer.hidden = !active;
+  if (!active) {
+    return;
+  }
+  elements.sessionTimer.dataset.kind = context.kind;
+  elements.sessionTimerLabel.textContent = context.kind === "work" ? "セット計測" : "セット間休憩";
+  elements.sessionTimerValue.textContent = formatDuration(Math.ceil(sessionCountdown.remainingMs / 1000));
+  const toggle = elements.sessionTimer.querySelector('[data-action="session-timer-toggle"]');
+  toggle.textContent = sessionCountdown.status === "paused" ? "再開" : "一時停止";
+}
+
+async function finishWorkout() {
+  if (!state.activeWorkout) {
+    return;
+  }
+  const completedSets = state.activeWorkout.items.flatMap((item) => item.sets).filter((set) => set.completed).length;
+  if (completedSets === 0) {
+    if (!window.confirm("完了したセットがありません。記録せずに終了しますか？")) {
+      return;
+    }
+    stopSessionTimer();
+    state.activeWorkout = null;
+    state.draftPlan = null;
+    await Promise.all([
+      saveAppState("activeWorkout", null),
+      saveAppState("draftPlan", null),
+    ]);
+    navigate("home");
+    showToast("トレーニングを終了しました");
+    return;
+  }
+
+  if (!window.confirm("現在の記録を保存してトレーニングを終了しますか？")) {
+    return;
+  }
+
+  stopSessionTimer();
+  const workout = {
+    ...state.activeWorkout,
+    completedAt: new Date().toISOString(),
+    items: state.activeWorkout.items.filter((item) => item.sets.some((set) => set.completed)),
+  };
+  await putOne("workouts", workout);
+  state.workouts = [workout, ...state.workouts];
+  state.activeWorkout = null;
+  state.draftPlan = null;
+  await Promise.all([
+    saveAppState("activeWorkout", null),
+    saveAppState("draftPlan", null),
+  ]);
+  sound.play("complete");
+  navigate("history");
+  showToast("トレーニングを保存しました");
+}
+
+async function toggleEquipment(id) {
+  const item = state.equipment.find((entry) => entry.id === id);
+  if (!item) {
+    return;
+  }
+  item.enabled = !item.enabled;
+  await putOne("equipment", item);
+  render();
+}
+
+async function addEquipment(form) {
+  const data = new FormData(form);
+  const name = String(data.get("name") || "").trim();
+  if (!name) {
+    return;
+  }
+  const item = { id: createId("equipment"), name, enabled: true, builtIn: false };
+  state.equipment.push(item);
+  await putOne("equipment", item);
+  form.reset();
+  render();
+  showToast("器具を追加しました");
+}
+
+async function removeEquipment(id) {
+  const item = state.equipment.find((entry) => entry.id === id);
+  if (!item || item.builtIn || !window.confirm(`「${item.name}」を削除しますか？`)) {
+    return;
+  }
+  state.equipment = state.equipment.filter((entry) => entry.id !== id);
+  await deleteOne("equipment", id);
+  render();
+}
+
+async function toggleExercise(id) {
+  const exercise = state.exercises.find((item) => item.id === id);
+  if (!exercise) {
+    return;
+  }
+  exercise.enabled = !exercise.enabled;
+  await putOne("exercises", exercise);
+  render();
+}
+
+async function addExercise(form) {
+  const data = new FormData(form);
+  const type = String(data.get("type"));
+  const target = Math.max(1, Number(data.get("target")) || 10);
+  const exercise = {
+    id: createId("exercise"),
+    name: String(data.get("name") || "").trim(),
+    muscleGroup: String(data.get("muscleGroup")),
+    equipment: [String(data.get("equipment"))],
+    type,
+    defaultReps: type === "reps" ? target : null,
+    defaultSeconds: type === "time" ? target : null,
+    defaultSets: Math.min(4, Math.max(2, Number(data.get("sets")) || 3)),
+    restSeconds: Math.min(600, Math.max(0, Number(data.get("rest")) || 0)),
+    intensities: ["light", "normal", "hard"],
+    foundation: false,
+    enabled: true,
+    builtIn: false,
+  };
+  if (!exercise.name) {
+    return;
+  }
+  state.exercises.push(exercise);
+  await putOne("exercises", exercise);
+  render();
+  showToast("種目を追加しました");
+}
+
+async function removeExercise(id) {
+  const exercise = state.exercises.find((item) => item.id === id);
+  if (!exercise || exercise.builtIn || !window.confirm(`「${exercise.name}」を削除しますか？`)) {
+    return;
+  }
+  state.exercises = state.exercises.filter((item) => item.id !== id);
+  await deleteOne("exercises", id);
+  render();
+}
+
+async function saveSettings() {
+  await putOne("settings", state.settings);
+}
+
+async function setSound(button) {
+  const { key, value } = button.dataset;
+  state.settings[key] = value;
+  await saveSettings();
+  render();
+}
+
+async function previewSound() {
+  await sound.unlock();
+  sound.play("work");
+}
+
+async function exportData() {
+  const data = await dumpDatabase();
+  const payload = {
+    app: "my-training-pwa",
+    schemaVersion: 1,
+    appVersion: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    data,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `my-training-backup-${localDateKey()}.json`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast("バックアップを書き出しました");
+}
+
+function validateImport(payload) {
+  const data = payload?.data;
+  return payload?.app === "my-training-pwa"
+    && payload?.schemaVersion === 1
+    && data
+    && ["settings", "equipment", "exercises", "workouts", "appState"].every((key) => Array.isArray(data[key]));
+}
+
+async function importData(file) {
+  try {
+    const payload = JSON.parse(await file.text());
+    if (!validateImport(payload)) {
+      throw new Error("対応していないバックアップ形式です。");
+    }
+    if (!window.confirm("現在の端末内データを、このバックアップ内容で置き換えますか？")) {
+      return;
+    }
+    await replaceDatabase(payload.data);
+    window.location.reload();
+  } catch (error) {
+    console.warn("Data import failed:", error);
+    showToast(error.message || "バックアップを読み込めませんでした");
+  } finally {
+    elements.importFile.value = "";
+  }
+}
+
+async function adjustIntervalSetting(button) {
+  const key = button.dataset.key;
+  const delta = Number(button.dataset.delta);
+  const limits = key === "intervalSets" ? [1, 99] : [5, 3600];
+  state.settings[key] = Math.min(limits[1], Math.max(limits[0], state.settings[key] + delta));
+  await saveSettings();
+  render();
+}
+
+async function startInterval() {
+  await sound.unlock();
+  state.interval.currentSet = 1;
+  state.interval.phase = "work";
+  state.interval.pausedPhase = null;
+  state.interval.lastSecond = null;
+  intervalCountdown.start(state.settings.intervalWorkSeconds);
+  sound.play("start");
+  render();
+}
+
+function toggleInterval() {
+  if (state.interval.phase === "paused") {
+    state.interval.phase = state.interval.pausedPhase;
+    state.interval.pausedPhase = null;
+    intervalCountdown.resume();
+  } else if (["work", "rest"].includes(state.interval.phase)) {
+    state.interval.pausedPhase = state.interval.phase;
+    state.interval.phase = "paused";
+    intervalCountdown.pause();
+  }
+  render();
+}
+
+function resetInterval() {
+  intervalCountdown.stop();
+  state.interval.phase = "idle";
+  state.interval.pausedPhase = null;
+  state.interval.currentSet = 1;
+  state.interval.lastSecond = null;
+  render();
+}
+
+function advanceInterval() {
+  if (state.interval.phase === "work") {
+    if (state.interval.currentSet >= state.settings.intervalSets) {
+      state.interval.phase = "complete";
+      sound.play("complete");
+      render();
+      return;
+    }
+    state.interval.phase = "rest";
+    state.interval.lastSecond = null;
+    intervalCountdown.start(state.settings.intervalRestSeconds);
+    sound.play("rest");
+  } else if (state.interval.phase === "rest") {
+    state.interval.currentSet += 1;
+    state.interval.phase = "work";
+    state.interval.lastSecond = null;
+    intervalCountdown.start(state.settings.intervalWorkSeconds);
+    sound.play("work");
+  }
+  render();
+}
+
+function needsWakeLock() {
+  const workoutOpen = Boolean(state.activeWorkout && state.route === "workout");
+  const sessionTimerActive = ["running", "paused"].includes(sessionCountdown.status);
+  const intervalActive = ["work", "rest", "paused"].includes(state.interval.phase);
+  return workoutOpen || sessionTimerActive || intervalActive;
+}
+
+async function requestWakeLock() {
+  if (!state.wakeLockSupported || state.wakeLockSentinel || state.wakeLockPending || state.wakeLockFailed || document.hidden || !needsWakeLock()) {
+    return;
+  }
+  state.wakeLockPending = true;
+  state.wakeLockFailed = false;
   try {
     const sentinel = await navigator.wakeLock.request("screen");
-
-    if (document.hidden || !isTimerActive()) {
+    if (document.hidden || !needsWakeLock()) {
       await sentinel.release();
       return;
     }
-
     state.wakeLockSentinel = sentinel;
     sentinel.addEventListener("release", () => {
       if (state.wakeLockSentinel === sentinel) {
         state.wakeLockSentinel = null;
-        state.wakeLockFailed = isTimerActive();
-        render();
+        state.wakeLockFailed = needsWakeLock();
+        updateWakeNote();
       }
     });
   } catch (error) {
-    state.wakeLockSentinel = null;
     state.wakeLockFailed = true;
     console.warn("Screen Wake Lock request failed:", error);
   } finally {
-    state.wakeLockRequestPending = false;
-    render();
+    state.wakeLockPending = false;
+    updateWakeNote();
   }
 }
 
@@ -369,182 +1106,136 @@ async function releaseWakeLock() {
   const sentinel = state.wakeLockSentinel;
   state.wakeLockSentinel = null;
   state.wakeLockFailed = false;
-
-  if (!sentinel) {
-    render();
-    return;
+  if (sentinel) {
+    try {
+      await sentinel.release();
+    } catch (error) {
+      console.warn("Screen Wake Lock release failed:", error);
+    }
   }
-
-  try {
-    await sentinel.release();
-  } catch (error) {
-    console.warn("Screen Wake Lock release failed:", error);
-  }
-
-  render();
+  updateWakeNote();
 }
 
-async function unlockAudio() {
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) {
-    return;
-  }
-
-  if (!state.audioContext) {
-    state.audioContext = new AudioContext();
-  }
-
-  if (state.audioContext.state === "suspended") {
-    await state.audioContext.resume();
+function syncWakeLock() {
+  if (needsWakeLock()) {
+    void requestWakeLock();
+  } else {
+    void releaseWakeLock();
   }
 }
 
-function playTone(frequency, duration, delay = 0, volumeScale = 1, waveType = "sine") {
-  if (!state.audioContext || state.audioContext.state !== "running") {
-    return;
+function wakeLockMessage() {
+  if (!needsWakeLock()) {
+    return "画面を開いた状態でご利用ください";
   }
-
-  const selectedVolume = VOLUME_LEVELS[state.settings.volume];
-  const volume = selectedVolume * volumeScale;
-  if (volume <= 0) {
-    return;
+  if (state.wakeLockSentinel) {
+    return "トレーニング中は画面がスリープしないようにしています";
   }
-
-  const startAt = state.audioContext.currentTime + delay;
-  const oscillator = state.audioContext.createOscillator();
-  const gain = state.audioContext.createGain();
-
-  oscillator.type = waveType;
-  oscillator.frequency.setValueAtTime(frequency, startAt);
-  gain.gain.setValueAtTime(0.0001, startAt);
-  gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.015);
-  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
-
-  oscillator.connect(gain);
-  gain.connect(state.audioContext.destination);
-  oscillator.start(startAt);
-  oscillator.stop(startAt + duration + 0.02);
+  return "画面ロックを防止できません。画面を開いた状態でご利用ください";
 }
 
-function playCountdownTone() {
-  playNotification("countdown");
-}
-
-function playPhaseTone(type) {
-  playNotification(type);
-}
-
-function playNotification(type) {
-  if (VOLUME_LEVELS[state.settings.volume] === 0) {
-    return;
-  }
-
-  if (state.settings.tone === "alarm") {
-    playAlarmSound(type);
-    return;
-  }
-
-  if (state.settings.tone === "bell") {
-    playBellSound(type);
-    return;
-  }
-
-  playBeepSound(type);
-}
-
-function playBeepSound(type) {
-  if (type === "countdown") {
-    playTone(660, 0.1, 0, 0.75);
-    return;
-  }
-
-  if (type === "complete") {
-    playTone(523, 0.16, 0, 0.72);
-    playTone(659, 0.16, 0.2, 0.78);
-    playTone(784, 0.34, 0.4, 0.9);
-    return;
-  }
-
-  const frequency = type === "rest" ? 440 : 880;
-  playTone(frequency, 0.14, 0, 0.8);
-  playTone(frequency, 0.14, 0.19, 0.8);
-}
-
-function playAlarmSound(type) {
-  if (type === "countdown") {
-    playTone(920, 0.055, 0, 0.58, "square");
-    playTone(650, 0.055, 0.07, 0.52, "square");
-    return;
-  }
-
-  const firstFrequency = type === "rest" ? 570 : 1040;
-  const secondFrequency = type === "rest" ? 390 : 720;
-  const repeats = type === "complete" ? 4 : 2;
-
-  for (let index = 0; index < repeats; index += 1) {
-    const delay = index * 0.22;
-    playTone(firstFrequency, 0.09, delay, 0.52, "square");
-    playTone(secondFrequency, 0.09, delay + 0.11, 0.46, "square");
-  }
-
-  if (type === "complete") {
-    playTone(1240, 0.3, 0.9, 0.56, "square");
+function updateWakeNote() {
+  const note = document.querySelector("#wake-note");
+  if (note) {
+    note.textContent = wakeLockMessage();
   }
 }
 
-function playBellSound(type) {
-  const baseFrequencies = {
-    countdown: 700,
-    start: 880,
-    work: 880,
-    rest: 440,
-    complete: 660,
+document.addEventListener("click", async (event) => {
+  const routeButton = event.target.closest("[data-route]");
+  if (routeButton) {
+    navigate(routeButton.dataset.route);
+    return;
+  }
+
+  const button = event.target.closest("[data-action]");
+  if (!button || button.disabled) {
+    return;
+  }
+
+  const action = button.dataset.action;
+  const actions = {
+    "generate-plan": () => createPlan(button.dataset.intensity),
+    "regenerate-plan": regeneratePlan,
+    "replace-exercise": () => replaceExercise(Number(button.dataset.index)),
+    "start-workout": startWorkout,
+    "adjust-record": () => adjustRecord(button),
+    "toggle-set-complete": () => toggleSetComplete(button),
+    "start-set-timer": () => startTimedSet(button),
+    "change-exercise-index": async () => {
+      const next = Math.min(
+        state.activeWorkout.items.length - 1,
+        Math.max(0, state.activeWorkout.currentExerciseIndex + Number(button.dataset.delta)),
+      );
+      state.activeWorkout.currentExerciseIndex = next;
+      await saveActiveWorkout();
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    },
+    "finish-workout": finishWorkout,
+    "session-timer-toggle": async () => {
+      await sound.unlock();
+      sessionCountdown.toggle();
+      renderSessionTimer();
+    },
+    "session-timer-add": () => sessionCountdown.addSeconds(15),
+    "session-timer-skip": () => {
+      sessionCountdown.stop();
+      return handleSessionTimerComplete();
+    },
+    "toggle-equipment": () => toggleEquipment(button.dataset.id),
+    "delete-equipment": () => removeEquipment(button.dataset.id),
+    "toggle-exercise": () => toggleExercise(button.dataset.id),
+    "delete-exercise": () => removeExercise(button.dataset.id),
+    "filter-exercises": () => {
+      state.exerciseFilter = button.dataset.group;
+      render();
+    },
+    "set-sound": () => setSound(button),
+    "preview-sound": previewSound,
+    "export-data": exportData,
+    "choose-import": () => elements.importFile.click(),
+    "adjust-interval-setting": () => adjustIntervalSetting(button),
+    "interval-start": startInterval,
+    "interval-toggle": toggleInterval,
+    "interval-reset": resetInterval,
+    reload: () => window.location.reload(),
   };
-  const baseFrequency = baseFrequencies[type];
-  const duration = type === "countdown" ? 0.16 : type === "complete" ? 0.75 : 0.38;
 
-  playBellChord(baseFrequency, duration);
-
-  if (type === "complete") {
-    playBellChord(baseFrequency * 1.25, 0.8, 0.32);
-    playBellChord(baseFrequency * 1.5, 0.9, 0.66);
+  if (actions[action]) {
+    await actions[action]();
   }
-}
-
-function playBellChord(baseFrequency, duration, delay = 0) {
-  playTone(baseFrequency, duration, delay, 0.58);
-  playTone(baseFrequency * 2, duration * 0.78, delay, 0.2);
-  playTone(baseFrequency * 3, duration * 0.58, delay, 0.1);
-}
-
-elements.settingButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    updateSetting(button.dataset.setting, Number(button.dataset.delta));
-  });
 });
 
-elements.soundButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    updateSoundSetting(button.dataset.soundSetting, button.dataset.value);
-  });
+document.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (event.target.id === "equipment-form") {
+    await addEquipment(event.target);
+  } else if (event.target.id === "exercise-form") {
+    await addExercise(event.target);
+  }
 });
 
-elements.previewButton.addEventListener("click", async () => {
-  await unlockAudio();
-  playNotification("work");
+elements.importFile.addEventListener("change", () => {
+  const [file] = elements.importFile.files;
+  if (file) {
+    void importData(file);
+  }
 });
 
-elements.startButton.addEventListener("click", startTimer);
-elements.pauseButton.addEventListener("click", pauseTimer);
-elements.resetButton.addEventListener("click", resetTimer);
+window.addEventListener("hashchange", () => {
+  state.route = getRoute();
+  render();
+  window.scrollTo({ top: 0 });
+});
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    tick();
-
-    if (isTimerActive()) {
-      void requestWakeLock();
-    }
+    sessionCountdown.sync();
+    intervalCountdown.sync();
+    // A visibility transition is the right time to retry a lock rejected earlier.
+    state.wakeLockFailed = false;
+    syncWakeLock();
   }
 });
 
@@ -560,4 +1251,4 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-resetTimer();
+void initialize();
