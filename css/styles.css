@@ -1571,6 +1571,22 @@ button:disabled {
 
 .toast[hidden] { display: none; }
 
+/* Compact only the phone menu; retain desktop spacing and navigation safe areas. */
+@media (max-width: 719px) {
+  .plan-hero { margin-bottom: 12px; }
+  .plan-hero .eyebrow { margin-bottom: 4px; }
+  .plan-hero p:last-child { margin-top: 5px; line-height: 1.45; }
+  .plan-list { gap: 7px; }
+  .plan-item { padding-block: 10px; }
+  .plan-item__title small { display: block; line-height: 1.2; }
+  .plan-item h2 { margin-top: 1px; line-height: 1.3; }
+  .plan-item__prescription { margin-top: 5px; line-height: 1.25; }
+  .plan-item__equipment { margin-top: 3px; line-height: 1.3; }
+  .plan-item__history { margin-top: 2px; font-size: 0.6rem; line-height: 1.3; }
+  .plan-item .swap-button { min-height: 44px; }
+  .sticky-action { margin-top: 10px; padding-top: 5px; }
+}
+
 @media (max-width: 380px) {
   .main-content { padding-inline: 14px; }
   .dashboard-grid { grid-template-columns: 1fr 1fr; }
