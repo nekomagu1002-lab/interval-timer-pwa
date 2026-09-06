@@ -25,7 +25,9 @@ function enabledEquipmentIds(equipment) {
 
 export function isExerciseAvailable(exercise, equipment) {
   const available = enabledEquipmentIds(equipment);
-  return exercise.enabled !== false && exercise.equipment.every((id) => available.has(id));
+  return exercise.enabled !== false
+    && exercise.apartmentSafe === true
+    && exercise.equipment.every((id) => available.has(id));
 }
 
 export function getExerciseHistory(exerciseId, workouts, limit = 5) {
@@ -99,6 +101,19 @@ function recentGroupLoad(groupId, workouts) {
   }, 0);
 }
 
+function exerciseCategory(exercise) {
+  if (exercise.equipment?.includes("tube")) {
+    return "tube";
+  }
+  if (exercise.equipmentType?.startsWith("dumbbell") || exercise.equipment?.some((id) => id.includes("dumbbell"))) {
+    return "dumbbell";
+  }
+  if (exercise.equipment?.includes("bodyweight")) {
+    return "bodyweight";
+  }
+  return exercise.equipmentType || exercise.equipment?.[0] || "other";
+}
+
 function chooseGroups(candidates, count, workouts, nonce) {
   const availableGroups = Object.keys(MUSCLE_GROUPS).filter((groupId) => (
     candidates.some((exercise) => exercise.muscleGroup === groupId)
@@ -144,6 +159,11 @@ function createPlanItem(exercise, intensity, workouts) {
     plannedSets: sets,
     restSeconds: exercise.restSeconds,
     suggestedWeight: Number(lastWeight) || 0,
+    previousWeight: Number(lastWeight) || 0,
+    commonWeights: [...(exercise.commonWeights || [])],
+    highLoadWeights: [...(exercise.highLoadWeights || [])],
+    weightRange: exercise.weightRange ? { ...exercise.weightRange } : null,
+    equipmentType: exercise.equipmentType || null,
     previousSummary: previous ? formatSetSummary(previous) : null,
     progressionHint: previous
       ? "前回を基準に、余裕があれば1回だけ上乗せ"
@@ -151,15 +171,25 @@ function createPlanItem(exercise, intensity, workouts) {
   };
 }
 
-function chooseExerciseForGroup(groupId, candidates, workouts, nonce, excludedIds = []) {
+function chooseExerciseForGroup(groupId, candidates, workouts, nonce, intensity, excludedIds = []) {
   const excluded = new Set(excludedIds);
+  const categoryUses = candidates
+    .filter((exercise) => excluded.has(exercise.id))
+    .reduce((counts, exercise) => {
+      const category = exerciseCategory(exercise);
+      counts.set(category, (counts.get(category) || 0) + 1);
+      return counts;
+    }, new Map());
+  const diversityPenalty = intensity === "normal" ? 2.5 : intensity === "hard" ? 1.3 : 0.35;
   return candidates
     .filter((exercise) => exercise.muscleGroup === groupId && !excluded.has(exercise.id))
     .map((exercise) => ({
       exercise,
       score:
         (exercise.foundation ? 4 : 0)
+        + (Number(exercise.priorityByIntensity?.[intensity]) || 0)
         - recentExercisePenalty(exercise, workouts)
+        - (categoryUses.get(exerciseCategory(exercise)) || 0) * diversityPenalty
         + hashNumber(`${nonce}-${exercise.id}`) * 2.5,
     }))
     .sort((a, b) => b.score - a.score)[0]?.exercise || null;
@@ -195,6 +225,7 @@ export function generatePlan({ intensity, equipment, exercises, workouts, nonce 
       candidates,
       workouts,
       nonce,
+      config.id,
       selected.map((item) => item.id),
     );
     if (exercise) {
@@ -206,7 +237,8 @@ export function generatePlan({ intensity, equipment, exercises, workouts, nonce 
     candidates
       .filter((exercise) => !selected.some((item) => item.id === exercise.id))
       .sort((a, b) => (
-        (b.foundation ? 1 : 0) - (a.foundation ? 1 : 0)
+        ((b.foundation ? 1 : 0) + (Number(b.priorityByIntensity?.[config.id]) || 0))
+        - ((a.foundation ? 1 : 0) + (Number(a.priorityByIntensity?.[config.id]) || 0))
         || hashNumber(`${nonce}-${a.id}`) - hashNumber(`${nonce}-${b.id}`)
       ))
       .slice(0, config.exerciseCount - selected.length)
@@ -243,6 +275,7 @@ export function replacePlanItem({ plan, itemIndex, equipment, exercises, workout
     candidates,
     workouts,
     `${Date.now()}-${itemIndex}`,
+    plan.intensity,
     usedIds,
   );
 

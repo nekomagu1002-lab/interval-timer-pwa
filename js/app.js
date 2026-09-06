@@ -397,6 +397,8 @@ function renderWorkout() {
         </details>
       ` : `<p class="first-record-note">この種目は初回です。無理のない値から始めましょう。</p>`}
 
+      ${item.type === "reps" ? renderWeightShortcuts(item, index) : ""}
+
       <div class="set-list">
         ${item.sets.map((set, setIndex) => renderSetRow(item, index, set, setIndex)).join("")}
       </div>
@@ -408,6 +410,42 @@ function renderWorkout() {
 
       <button class="finish-button" type="button" data-action="finish-workout">トレーニングを終了して保存</button>
     </section>
+  `;
+}
+
+function renderWeightShortcuts(item, itemIndex) {
+  const choices = new Map();
+  const addChoice = (value, label, kind = "common") => {
+    const weight = Number(value);
+    if (!(weight > 0)) {
+      return;
+    }
+    const key = String(weight);
+    const existing = choices.get(key);
+    choices.set(key, {
+      weight,
+      kind: existing?.kind === "previous" ? "previous" : kind,
+      labels: [...(existing?.labels || []), label],
+    });
+  };
+
+  addChoice(item.previousWeight, "前回", "previous");
+  (item.commonWeights || []).forEach((weight) => addChoice(weight, "よく使う"));
+  (item.highLoadWeights || []).forEach((weight) => addChoice(weight, "高負荷", "high"));
+
+  if (choices.size === 0) {
+    return "";
+  }
+
+  return `
+    <div class="weight-shortcuts" aria-label="重量の候補">
+      <span>重量をまとめて入力</span>
+      <div>${[...choices.values()].map((choice) => `
+        <button type="button" class="weight-shortcut weight-shortcut--${choice.kind}" data-action="apply-weight-preset" data-item-index="${itemIndex}" data-weight="${choice.weight}">
+          <small>${choice.labels.join("・")}</small><strong>${formatWeight(choice.weight)}kg</strong>
+        </button>
+      `).join("")}</div>
+    </div>
   `;
 }
 
@@ -426,12 +464,13 @@ function renderSetRow(item, itemIndex, set, setIndex) {
     `;
   }
 
+  const weightStep = Number(item.weightRange?.step) || 0.5;
   return `
     <article class="set-row ${set.completed ? "is-complete" : ""}">
       <span class="set-row__number">${setIndex + 1}</span>
       <div class="record-stepper">
         <span>重量</span>
-        <div><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="weight" data-delta="-0.5" ${set.completed ? "disabled" : ""}>−</button><strong>${formatWeight(set.weight)}</strong><small>kg</small><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="weight" data-delta="0.5" ${set.completed ? "disabled" : ""}>＋</button></div>
+        <div><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="weight" data-delta="-${weightStep}" ${set.completed ? "disabled" : ""}>−</button><strong>${formatWeight(set.weight)}</strong><small>kg</small><button type="button" data-action="adjust-record" data-item-index="${itemIndex}" data-set-index="${setIndex}" data-field="weight" data-delta="${weightStep}" ${set.completed ? "disabled" : ""}>＋</button></div>
       </div>
       <div class="record-stepper">
         <span>回数</span>
@@ -489,7 +528,7 @@ function renderExercises() {
           return `
             <article class="catalog-card ${exercise.enabled ? "" : "is-disabled"}">
               <span class="muscle-dot" style="--dot-color:${MUSCLE_GROUPS[exercise.muscleGroup]?.color}"></span>
-              <div><small>${MUSCLE_GROUPS[exercise.muscleGroup]?.label}・${exercise.type === "time" ? `${exercise.defaultSeconds}秒` : `${exercise.defaultReps}回`}・${exercise.defaultSets}セット</small><h2>${escapeHtml(exercise.name)}</h2><p>${exercise.equipment.map(equipmentName).map(escapeHtml).join("・")} / 休憩${exercise.restSeconds}秒 / ${(exercise.intensities || []).map((id) => INTENSITIES[id]?.label).filter(Boolean).join("・")}</p></div>
+              <div><small>${MUSCLE_GROUPS[exercise.muscleGroup]?.label}・${exercise.type === "time" ? `${exercise.defaultSeconds}秒` : `${exercise.defaultReps}回`}・${exercise.defaultSets}セット</small><h2>${escapeHtml(exercise.name)}</h2><p>${exercise.equipment.map(equipmentName).map(escapeHtml).join("・")} / 休憩${exercise.restSeconds}秒 / ${(exercise.intensities || []).map((id) => INTENSITIES[id]?.label).filter(Boolean).join("・")} / ${exercise.apartmentSafe === true ? "集合住宅OK" : "提案対象外"}</p></div>
               <button class="toggle-button ${exercise.enabled ? "is-on" : ""}" type="button" data-action="toggle-exercise" data-id="${escapeHtml(exercise.id)}" aria-pressed="${exercise.enabled}">${exercise.enabled ? "ON" : "OFF"}</button>
               ${exercise.builtIn ? "" : `<button class="delete-button" type="button" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}" aria-label="${escapeHtml(exercise.name)}を削除">×</button>`}
               ${histories.length ? `
@@ -540,6 +579,10 @@ function renderExerciseForm() {
           </div>
           <p class="choice-error" data-choice-error="intensities" role="alert" hidden>対応強度を1つ以上選択してください。</p>
         </fieldset>
+        <label class="choice-chip field--wide safety-choice">
+          <input type="checkbox" name="apartmentSafe" checked>
+          <span>集合住宅で静かに実施できる種目</span>
+        </label>
         <label class="field"><span>基準回数／秒</span><input name="target" type="number" inputmode="numeric" min="1" max="999" value="10" required></label>
         <label class="field"><span>標準セット</span><input name="sets" type="number" inputmode="numeric" min="2" max="4" value="3" required></label>
         <label class="field"><span>休憩（秒）</span><input name="rest" type="number" inputmode="numeric" min="0" max="600" step="5" value="60" required></label>
@@ -557,7 +600,7 @@ function renderEquipment() {
         ${state.equipment.map((item) => `
           <article class="equipment-card ${item.enabled ? "is-enabled" : ""}">
             <span class="equipment-card__icon">${item.id === "bodyweight" ? "人" : "＋"}</span>
-            <div><h2>${escapeHtml(item.name)}</h2><p>${item.enabled ? "メニュー生成に使用" : "現在は使用しない"}</p></div>
+            <div><h2>${escapeHtml(item.name)}</h2><p>${escapeHtml(item.description ? `${item.description}・${item.enabled ? "使用中" : "現在OFF"}` : (item.enabled ? "メニュー生成に使用" : "現在は使用しない"))}</p></div>
             <button class="switch" type="button" data-action="toggle-equipment" data-id="${escapeHtml(item.id)}" aria-pressed="${item.enabled}"><span></span></button>
             ${item.builtIn ? "" : `<button class="delete-button" type="button" data-action="delete-equipment" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name)}を削除">×</button>`}
           </article>
@@ -736,6 +779,22 @@ async function adjustRecord(button) {
   set[field] = field === "weight" ? Math.round(nextValue * 2) / 2 : Math.round(nextValue);
   await saveActiveWorkout();
   render();
+}
+
+async function applyWeightPreset(button) {
+  const item = state.activeWorkout?.items[Number(button.dataset.itemIndex)];
+  const weight = Number(button.dataset.weight);
+  if (!item || !(weight > 0)) {
+    return;
+  }
+  item.sets.forEach((set) => {
+    if (!set.completed) {
+      set.weight = weight;
+    }
+  });
+  await saveActiveWorkout();
+  render();
+  showToast(`${formatWeight(weight)}kgを未完了セットに入力しました`);
 }
 
 async function toggleSetComplete(button) {
@@ -966,6 +1025,7 @@ async function addExercise(form) {
     defaultSets: Math.min(4, Math.max(2, Number(data.get("sets")) || 3)),
     restSeconds: Math.min(600, Math.max(0, Number(data.get("rest")) || 0)),
     intensities,
+    apartmentSafe: data.has("apartmentSafe"),
     foundation: false,
     enabled: true,
     builtIn: false,
@@ -1209,6 +1269,7 @@ document.addEventListener("click", async (event) => {
     "replace-exercise": () => replaceExercise(Number(button.dataset.index)),
     "start-workout": startWorkout,
     "adjust-record": () => adjustRecord(button),
+    "apply-weight-preset": () => applyWeightPreset(button),
     "toggle-set-complete": () => toggleSetComplete(button),
     "start-set-timer": () => startTimedSet(button),
     "change-exercise-index": async () => {

@@ -1,6 +1,6 @@
 export const APP_VERSION = "1.0.0";
-// Increment this only when adding built-in equipment or exercises.
-export const MASTER_DATA_VERSION = 2;
+// Increment this when built-in master data needs to be added or safely migrated.
+export const MASTER_DATA_VERSION = 3;
 
 export const INTENSITIES = Object.freeze({
   light: {
@@ -51,18 +51,133 @@ export const DEFAULT_SETTINGS = Object.freeze({
 });
 
 export const DEFAULT_EQUIPMENT = Object.freeze([
-  { id: "bodyweight", name: "自重", enabled: true, builtIn: true },
-  { id: "dumbbell", name: "ダンベル", enabled: true, builtIn: true },
-  { id: "mat", name: "トレーニングマット", enabled: true, builtIn: true },
-  { id: "ab-wheel", name: "腹筋ローラー", enabled: false, builtIn: true },
+  { id: "bodyweight", name: "自重", equipmentType: "bodyweight", enabled: true, builtIn: true },
+  {
+    id: "dumbbell",
+    name: "可変式ダンベルA ×2",
+    description: "最大10kg・2.5kg刻み・普段は7.5kg",
+    equipmentType: "dumbbell-adjustable-light",
+    weightOptions: [2.5, 5, 7.5, 10],
+    commonWeights: [7.5],
+    maxWeight: 10,
+    weightStep: 2.5,
+    enabled: true,
+    builtIn: true,
+  },
+  {
+    id: "dumbbell-fixed-4",
+    name: "4kg固定ダンベル ×2",
+    description: "軽負荷・補助種目向け",
+    equipmentType: "dumbbell-fixed",
+    weightOptions: [4],
+    commonWeights: [4],
+    maxWeight: 4,
+    enabled: true,
+    builtIn: true,
+  },
+  {
+    id: "dumbbell-heavy",
+    name: "可変式ダンベルB ×2",
+    description: "最大20kg・2.5kg刻み・普段は15kg（20kgは高負荷候補）",
+    equipmentType: "dumbbell-adjustable-heavy",
+    weightOptions: [2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20],
+    commonWeights: [15],
+    highLoadWeights: [20],
+    maxWeight: 20,
+    weightStep: 2.5,
+    enabled: true,
+    builtIn: true,
+  },
+  { id: "mat", name: "ヨガマット", equipmentType: "mat", enabled: true, builtIn: true },
+  { id: "ab-wheel", name: "腹筋ローラー", equipmentType: "ab-wheel", enabled: true, builtIn: true },
+  { id: "pushup-bars", name: "プッシュアップバー", equipmentType: "pushup-bars", enabled: true, builtIn: true },
   { id: "bench", name: "ベンチ", enabled: false, builtIn: true },
-  { id: "tube", name: "トレーニングチューブ", enabled: false, builtIn: true },
+  {
+    id: "tube",
+    name: "帯状ゴムチューブ",
+    description: "約16cm × 125cm・輪なし・軽負荷向け",
+    equipmentType: "flat-resistance-band",
+    enabled: true,
+    builtIn: true,
+  },
 ]);
 
 const all = ["light", "normal", "hard"];
 const normalHard = ["normal", "hard"];
 
-export const DEFAULT_EXERCISES = Object.freeze([
+const EXERCISE_PROFILES = Object.freeze({
+  "goblet-squat": {
+    equipment: ["dumbbell-heavy"],
+    equipmentType: "dumbbell-adjustable-heavy",
+    weightRange: { min: 7.5, max: 20, step: 2.5 },
+    commonWeights: [15],
+    highLoadWeights: [20],
+    priorityByIntensity: { normal: 1.5, hard: 3 },
+  },
+  "dumbbell-rdl": {
+    equipment: ["dumbbell-heavy"],
+    equipmentType: "dumbbell-adjustable-heavy",
+    weightRange: { min: 7.5, max: 20, step: 2.5 },
+    commonWeights: [15],
+    highLoadWeights: [20],
+    priorityByIntensity: { normal: 1.5, hard: 3 },
+  },
+  "dumbbell-floor-press": {
+    equipment: ["dumbbell-heavy", "mat"],
+    equipmentType: "dumbbell-adjustable-heavy",
+    weightRange: { min: 7.5, max: 20, step: 2.5 },
+    commonWeights: [15],
+    highLoadWeights: [20],
+    priorityByIntensity: { normal: 1.5, hard: 3 },
+  },
+  "dumbbell-bench-press": {
+    equipment: ["dumbbell-heavy", "bench"],
+    equipmentType: "dumbbell-adjustable-heavy",
+    weightRange: { min: 7.5, max: 20, step: 2.5 },
+    commonWeights: [15],
+    highLoadWeights: [20],
+    priorityByIntensity: { normal: 1.5, hard: 3 },
+  },
+  "one-arm-row": {
+    equipment: ["dumbbell-heavy"],
+    intensities: normalHard,
+    equipmentType: "dumbbell-adjustable-heavy",
+    weightRange: { min: 7.5, max: 20, step: 2.5 },
+    commonWeights: [15],
+    highLoadWeights: [20],
+    priorityByIntensity: { normal: 1.5, hard: 3 },
+  },
+  "dumbbell-shoulder-press": {
+    equipmentType: "dumbbell-adjustable-light",
+    weightRange: { min: 2.5, max: 10, step: 2.5 },
+    commonWeights: [7.5],
+    priorityByIntensity: { normal: 1, hard: 1 },
+  },
+  "dumbbell-curl": {
+    intensities: normalHard,
+    equipmentType: "dumbbell-adjustable-light",
+    weightRange: { min: 2.5, max: 10, step: 2.5 },
+    commonWeights: [7.5],
+    priorityByIntensity: { normal: 1, hard: 0.5 },
+  },
+  "overhead-triceps-extension": {
+    equipmentType: "dumbbell-adjustable-light",
+    weightRange: { min: 2.5, max: 10, step: 2.5 },
+    commonWeights: [7.5],
+    priorityByIntensity: { normal: 1, hard: 0.5 },
+  },
+  "lateral-raise": {
+    equipment: ["dumbbell-fixed-4"],
+    intensities: normalHard,
+    equipmentType: "dumbbell-fixed",
+    weightRange: { min: 4, max: 4, step: 0 },
+    commonWeights: [4],
+    priorityByIntensity: { normal: 1, hard: 0 },
+  },
+  "ab-wheel-rollout": { priorityByIntensity: { normal: 1, hard: 3 } },
+});
+
+const exerciseDefaults = [
   {
     id: "bodyweight-squat",
     name: "スクワット",
@@ -204,6 +319,21 @@ export const DEFAULT_EXERCISES = Object.freeze([
     builtIn: true,
   },
   {
+    id: "pushup-bars-push-up",
+    name: "プッシュアップバー・プッシュアップ",
+    muscleGroup: "chest",
+    equipment: ["pushup-bars"],
+    type: "reps",
+    defaultReps: 10,
+    defaultSets: 3,
+    restSeconds: 60,
+    intensities: normalHard,
+    foundation: false,
+    priorityByIntensity: { normal: 0.5, hard: 1 },
+    enabled: true,
+    builtIn: true,
+  },
+  {
     id: "one-arm-row",
     name: "ワンハンドロー",
     muscleGroup: "back",
@@ -249,6 +379,20 @@ export const DEFAULT_EXERCISES = Object.freeze([
     id: "tube-pull-apart",
     name: "チューブプルアパート",
     muscleGroup: "back",
+    equipment: ["tube"],
+    type: "reps",
+    defaultReps: 15,
+    defaultSets: 2,
+    restSeconds: 45,
+    intensities: all,
+    foundation: false,
+    enabled: true,
+    builtIn: true,
+  },
+  {
+    id: "tube-side-raise",
+    name: "チューブサイドレイズ",
+    muscleGroup: "shoulders",
     equipment: ["tube"],
     type: "reps",
     defaultReps: 15,
@@ -344,6 +488,48 @@ export const DEFAULT_EXERCISES = Object.freeze([
     builtIn: true,
   },
   {
+    id: "tube-triceps-extension",
+    name: "チューブトライセプスエクステンション",
+    muscleGroup: "arms",
+    equipment: ["tube"],
+    type: "reps",
+    defaultReps: 15,
+    defaultSets: 2,
+    restSeconds: 45,
+    intensities: all,
+    foundation: false,
+    enabled: true,
+    builtIn: true,
+  },
+  {
+    id: "tube-squat-assist",
+    name: "チューブスクワット補助",
+    muscleGroup: "legs",
+    equipment: ["tube"],
+    type: "reps",
+    defaultReps: 15,
+    defaultSets: 2,
+    restSeconds: 45,
+    intensities: ["light", "normal"],
+    foundation: false,
+    enabled: true,
+    builtIn: true,
+  },
+  {
+    id: "tube-hip-abduction",
+    name: "チューブヒップアブダクション",
+    muscleGroup: "legs",
+    equipment: ["tube", "mat"],
+    type: "reps",
+    defaultReps: 15,
+    defaultSets: 2,
+    restSeconds: 30,
+    intensities: ["light", "normal"],
+    foundation: false,
+    enabled: true,
+    builtIn: true,
+  },
+  {
     id: "plank",
     name: "プランク",
     muscleGroup: "core",
@@ -399,7 +585,19 @@ export const DEFAULT_EXERCISES = Object.freeze([
     enabled: true,
     builtIn: true,
   },
-]);
+];
+
+export const DEFAULT_EXERCISES = Object.freeze(exerciseDefaults.map((exercise) => {
+  const profile = EXERCISE_PROFILES[exercise.id] || {};
+  const usesTube = exercise.equipment.includes("tube");
+  return Object.freeze({
+    apartmentSafe: true,
+    equipmentType: usesTube ? "flat-resistance-band" : undefined,
+    priorityByIntensity: usesTube ? { light: 7, normal: 0.5, hard: -1 } : undefined,
+    ...exercise,
+    ...profile,
+  });
+}));
 
 export function createId(prefix = "item") {
   if (globalThis.crypto?.randomUUID) {

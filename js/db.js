@@ -7,6 +7,7 @@ import {
 
 const DB_NAME = "myTrainingPwa";
 const DB_VERSION = 1;
+const HOME_PROFILE_MIGRATION_VERSION = 3;
 const STORES = ["settings", "equipment", "exercises", "workouts", "appState"];
 
 let databasePromise;
@@ -71,6 +72,27 @@ export function planMasterDataSync(existingSettings, equipment, exercises) {
     || exercises.length === 0;
   const equipmentIds = new Set(equipment.map((item) => item.id));
   const exerciseIds = new Set(exercises.map((item) => item.id));
+  const equipmentDefaults = new Map(DEFAULT_EQUIPMENT.map((item) => [item.id, item]));
+  const exerciseDefaults = new Map(DEFAULT_EXERCISES.map((item) => [item.id, item]));
+  const shouldApplyHomeProfile = storedVersion < HOME_PROFILE_MIGRATION_VERSION;
+
+  const updatedEquipment = shouldApplyHomeProfile
+    ? equipment
+      .filter((item) => item.builtIn && equipmentDefaults.has(item.id))
+      .map((item) => ({ ...item, ...equipmentDefaults.get(item.id), enabled: item.enabled }))
+      .filter((item) => JSON.stringify(item) !== JSON.stringify(equipment.find((current) => current.id === item.id)))
+    : [];
+  const updatedExercises = shouldApplyHomeProfile
+    ? exercises
+      .map((item) => {
+        if (item.builtIn && exerciseDefaults.has(item.id)) {
+          return { ...item, ...exerciseDefaults.get(item.id), enabled: item.enabled };
+        }
+        // Unknown legacy custom exercises are kept, but excluded until their apartment safety is explicit.
+        return item.apartmentSafe === undefined ? { ...item, apartmentSafe: false } : item;
+      })
+      .filter((item) => JSON.stringify(item) !== JSON.stringify(exercises.find((current) => current.id === item.id)))
+    : [];
 
   return {
     settings: {
@@ -85,6 +107,8 @@ export function planMasterDataSync(existingSettings, equipment, exercises) {
     missingExercises: shouldSync
       ? DEFAULT_EXERCISES.filter((item) => !exerciseIds.has(item.id)).map((item) => ({ ...item }))
       : [],
+    updatedEquipment,
+    updatedExercises,
   };
 }
 
@@ -106,18 +130,25 @@ export async function initializeDatabase() {
     getAll("exercises"),
   ]);
   const syncPlan = planMasterDataSync(existingSettings, equipment, exercises);
-  const hasMissingMasterData = syncPlan.missingEquipment.length > 0 || syncPlan.missingExercises.length > 0;
+  const hasMasterDataChanges = [
+    syncPlan.missingEquipment,
+    syncPlan.missingExercises,
+    syncPlan.updatedEquipment,
+    syncPlan.updatedExercises,
+  ].some((items) => items.length > 0);
 
-  if (!hasMissingMasterData) {
+  if (!hasMasterDataChanges) {
     await putOne("settings", syncPlan.settings);
     return;
   }
 
-  // Add only unknown built-in IDs. Existing ON/OFF values and custom records are untouched.
+  // Add unknown IDs and apply narrowly versioned profile updates. User ON/OFF and custom fields are preserved.
   const transaction = database.transaction(["settings", "equipment", "exercises"], "readwrite");
   transaction.objectStore("settings").put(syncPlan.settings);
   syncPlan.missingEquipment.forEach((item) => transaction.objectStore("equipment").put(item));
   syncPlan.missingExercises.forEach((item) => transaction.objectStore("exercises").put(item));
+  syncPlan.updatedEquipment.forEach((item) => transaction.objectStore("equipment").put(item));
+  syncPlan.updatedExercises.forEach((item) => transaction.objectStore("exercises").put(item));
   await transactionToPromise(transaction);
 }
 
