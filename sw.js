@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "my-training-pwa-v1.0.0";
+const CACHE_NAME = "my-training-pwa-v1.0.0-r2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -13,6 +13,9 @@ const APP_SHELL = [
   "./js/generator.js",
   "./js/timer.js",
   "./assets/icons/icon.svg",
+  "./assets/icons/apple-touch-icon-180.png",
+  "./assets/icons/icon-192.png",
+  "./assets/icons/icon-512.png",
 ];
 
 self.addEventListener("install", (event) => {

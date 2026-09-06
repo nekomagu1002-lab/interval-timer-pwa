@@ -1,4 +1,9 @@
-import { DEFAULT_EQUIPMENT, DEFAULT_EXERCISES, DEFAULT_SETTINGS } from "./data.js";
+import {
+  DEFAULT_EQUIPMENT,
+  DEFAULT_EXERCISES,
+  DEFAULT_SETTINGS,
+  MASTER_DATA_VERSION,
+} from "./data.js";
 
 const DB_NAME = "myTrainingPwa";
 const DB_VERSION = 1;
@@ -59,6 +64,30 @@ export function openDatabase() {
   return databasePromise;
 }
 
+export function planMasterDataSync(existingSettings, equipment, exercises) {
+  const storedVersion = Math.max(0, Number(existingSettings?.seededVersion) || 0);
+  const shouldSync = storedVersion < MASTER_DATA_VERSION
+    || equipment.length === 0
+    || exercises.length === 0;
+  const equipmentIds = new Set(equipment.map((item) => item.id));
+  const exerciseIds = new Set(exercises.map((item) => item.id));
+
+  return {
+    settings: {
+      id: "preferences",
+      ...DEFAULT_SETTINGS,
+      ...existingSettings,
+      seededVersion: Math.max(storedVersion, MASTER_DATA_VERSION),
+    },
+    missingEquipment: shouldSync
+      ? DEFAULT_EQUIPMENT.filter((item) => !equipmentIds.has(item.id)).map((item) => ({ ...item }))
+      : [],
+    missingExercises: shouldSync
+      ? DEFAULT_EXERCISES.filter((item) => !exerciseIds.has(item.id)).map((item) => ({ ...item }))
+      : [],
+  };
+}
+
 export async function initializeDatabase() {
   const database = await openDatabase();
   const existingSettings = await getOne("settings", "preferences");
@@ -72,20 +101,24 @@ export async function initializeDatabase() {
     return;
   }
 
-  const mergedSettings = { id: "preferences", ...DEFAULT_SETTINGS, ...existingSettings };
-  await putOne("settings", mergedSettings);
-
-  const [equipmentCount, exerciseCount] = await Promise.all([
-    countStore("equipment"),
-    countStore("exercises"),
+  const [equipment, exercises] = await Promise.all([
+    getAll("equipment"),
+    getAll("exercises"),
   ]);
+  const syncPlan = planMasterDataSync(existingSettings, equipment, exercises);
+  const hasMissingMasterData = syncPlan.missingEquipment.length > 0 || syncPlan.missingExercises.length > 0;
 
-  if (equipmentCount === 0) {
-    await putMany("equipment", DEFAULT_EQUIPMENT.map((item) => ({ ...item })));
+  if (!hasMissingMasterData) {
+    await putOne("settings", syncPlan.settings);
+    return;
   }
-  if (exerciseCount === 0) {
-    await putMany("exercises", DEFAULT_EXERCISES.map((item) => ({ ...item })));
-  }
+
+  // Add only unknown built-in IDs. Existing ON/OFF values and custom records are untouched.
+  const transaction = database.transaction(["settings", "equipment", "exercises"], "readwrite");
+  transaction.objectStore("settings").put(syncPlan.settings);
+  syncPlan.missingEquipment.forEach((item) => transaction.objectStore("equipment").put(item));
+  syncPlan.missingExercises.forEach((item) => transaction.objectStore("exercises").put(item));
+  await transactionToPromise(transaction);
 }
 
 export async function getOne(storeName, key) {
@@ -100,25 +133,12 @@ export async function getAll(storeName) {
   return requestToPromise(transaction.objectStore(storeName).getAll());
 }
 
-export async function countStore(storeName) {
-  const database = await openDatabase();
-  const transaction = database.transaction(storeName, "readonly");
-  return requestToPromise(transaction.objectStore(storeName).count());
-}
-
 export async function putOne(storeName, value) {
   const database = await openDatabase();
   const transaction = database.transaction(storeName, "readwrite");
   transaction.objectStore(storeName).put(value);
   await transactionToPromise(transaction);
   return value;
-}
-
-export async function putMany(storeName, values) {
-  const database = await openDatabase();
-  const transaction = database.transaction(storeName, "readwrite");
-  values.forEach((value) => transaction.objectStore(storeName).put(value));
-  await transactionToPromise(transaction);
 }
 
 export async function deleteOne(storeName, key) {

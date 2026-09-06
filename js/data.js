@@ -1,4 +1,6 @@
 export const APP_VERSION = "1.0.0";
+// Increment this only when adding built-in equipment or exercises.
+export const MASTER_DATA_VERSION = 2;
 
 export const INTENSITIES = Object.freeze({
   light: {
@@ -45,7 +47,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   intervalWorkSeconds: 30,
   intervalRestSeconds: 30,
   intervalSets: 5,
-  seededVersion: 1,
+  seededVersion: MASTER_DATA_VERSION,
 });
 
 export const DEFAULT_EQUIPMENT = Object.freeze([
@@ -405,4 +407,8 @@ export function createId(prefix = "item") {
   }
 
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function findExercisesUsingEquipment(exercises, equipmentId) {
+  return exercises.filter((exercise) => exercise.equipment?.includes(equipmentId));
 }

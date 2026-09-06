@@ -14,6 +14,7 @@ import {
   INTENSITIES,
   MUSCLE_GROUPS,
   createId,
+  findExercisesUsingEquipment,
 } from "./data.js";
 import {
   formatSetSummary,
@@ -488,7 +489,7 @@ function renderExercises() {
           return `
             <article class="catalog-card ${exercise.enabled ? "" : "is-disabled"}">
               <span class="muscle-dot" style="--dot-color:${MUSCLE_GROUPS[exercise.muscleGroup]?.color}"></span>
-              <div><small>${MUSCLE_GROUPS[exercise.muscleGroup]?.label}・${exercise.type === "time" ? `${exercise.defaultSeconds}秒` : `${exercise.defaultReps}回`}・${exercise.defaultSets}セット</small><h2>${escapeHtml(exercise.name)}</h2><p>${exercise.equipment.map(equipmentName).map(escapeHtml).join("・")} / 休憩${exercise.restSeconds}秒</p></div>
+              <div><small>${MUSCLE_GROUPS[exercise.muscleGroup]?.label}・${exercise.type === "time" ? `${exercise.defaultSeconds}秒` : `${exercise.defaultReps}回`}・${exercise.defaultSets}セット</small><h2>${escapeHtml(exercise.name)}</h2><p>${exercise.equipment.map(equipmentName).map(escapeHtml).join("・")} / 休憩${exercise.restSeconds}秒 / ${(exercise.intensities || []).map((id) => INTENSITIES[id]?.label).filter(Boolean).join("・")}</p></div>
               <button class="toggle-button ${exercise.enabled ? "is-on" : ""}" type="button" data-action="toggle-exercise" data-id="${escapeHtml(exercise.id)}" aria-pressed="${exercise.enabled}">${exercise.enabled ? "ON" : "OFF"}</button>
               ${exercise.builtIn ? "" : `<button class="delete-button" type="button" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}" aria-label="${escapeHtml(exercise.name)}を削除">×</button>`}
               ${histories.length ? `
@@ -507,14 +508,38 @@ function renderExercises() {
 }
 
 function renderExerciseForm() {
+  const hasBodyweight = state.equipment.some((item) => item.id === "bodyweight");
   return `
     <details class="add-panel">
       <summary>＋ 自分用の種目を追加</summary>
       <form id="exercise-form" class="form-grid">
         <label class="field field--wide"><span>種目名</span><input name="name" required maxlength="40" placeholder="例：ブルガリアンスクワット"></label>
         <label class="field"><span>対象部位</span><select name="muscleGroup">${Object.entries(MUSCLE_GROUPS).map(([id, group]) => `<option value="${id}">${group.label}</option>`).join("")}</select></label>
-        <label class="field"><span>必要器具</span><select name="equipment">${state.equipment.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("")}</select></label>
         <label class="field"><span>種類</span><select name="type"><option value="reps">回数</option><option value="time">時間</option></select></label>
+        <fieldset class="choice-field field--wide" data-choice-group="equipment">
+          <legend>必要器具 <small>複数選択可</small></legend>
+          <div class="choice-grid">
+            ${state.equipment.map((item, index) => `
+              <label class="choice-chip">
+                <input type="checkbox" name="equipment" value="${escapeHtml(item.id)}" ${(item.id === "bodyweight" || (!hasBodyweight && index === 0)) ? "checked" : ""}>
+                <span>${escapeHtml(item.name)}</span>
+              </label>
+            `).join("")}
+          </div>
+          <p class="choice-error" data-choice-error="equipment" role="alert" hidden>必要器具を1つ以上選択してください。</p>
+        </fieldset>
+        <fieldset class="choice-field field--wide" data-choice-group="intensities">
+          <legend>対応強度 <small>複数選択可</small></legend>
+          <div class="choice-grid choice-grid--three">
+            ${Object.values(INTENSITIES).map((item) => `
+              <label class="choice-chip choice-chip--${item.accent}">
+                <input type="checkbox" name="intensities" value="${item.id}" checked>
+                <span>${item.label}</span>
+              </label>
+            `).join("")}
+          </div>
+          <p class="choice-error" data-choice-error="intensities" role="alert" hidden>対応強度を1つ以上選択してください。</p>
+        </fieldset>
         <label class="field"><span>基準回数／秒</span><input name="target" type="number" inputmode="numeric" min="1" max="999" value="10" required></label>
         <label class="field"><span>標準セット</span><input name="sets" type="number" inputmode="numeric" min="2" max="4" value="3" required></label>
         <label class="field"><span>休憩（秒）</span><input name="rest" type="number" inputmode="numeric" min="0" max="600" step="5" value="60" required></label>
@@ -884,7 +909,17 @@ async function addEquipment(form) {
 
 async function removeEquipment(id) {
   const item = state.equipment.find((entry) => entry.id === id);
-  if (!item || item.builtIn || !window.confirm(`「${item.name}」を削除しますか？`)) {
+  if (!item || item.builtIn) {
+    return;
+  }
+  const references = findExercisesUsingEquipment(state.exercises, id);
+  if (references.length > 0) {
+    const names = references.slice(0, 5).map((exercise) => `・${exercise.name}`).join("\n");
+    const remainder = references.length > 5 ? `\nほか${references.length - 5}件` : "";
+    window.alert(`「${item.name}」は次の種目で使用されているため削除できません。\n\n${names}${remainder}\n\n先に参照している自作種目を削除してください。`);
+    return;
+  }
+  if (!window.confirm(`「${item.name}」を削除しますか？`)) {
     return;
   }
   state.equipment = state.equipment.filter((entry) => entry.id !== id);
@@ -906,17 +941,31 @@ async function addExercise(form) {
   const data = new FormData(form);
   const type = String(data.get("type"));
   const target = Math.max(1, Number(data.get("target")) || 10);
+  const validEquipmentIds = new Set(state.equipment.map((item) => item.id));
+  const equipment = data.getAll("equipment").map(String).filter((id) => validEquipmentIds.has(id));
+  const intensities = data.getAll("intensities").map(String).filter((id) => INTENSITIES[id]);
+
+  if (equipment.length === 0 || intensities.length === 0) {
+    const missingGroup = equipment.length === 0 ? "equipment" : "intensities";
+    const error = form.querySelector(`[data-choice-error="${missingGroup}"]`);
+    if (error) {
+      error.hidden = false;
+    }
+    form.querySelector(`input[name="${missingGroup}"]`)?.focus();
+    return;
+  }
+
   const exercise = {
     id: createId("exercise"),
     name: String(data.get("name") || "").trim(),
     muscleGroup: String(data.get("muscleGroup")),
-    equipment: [String(data.get("equipment"))],
+    equipment,
     type,
     defaultReps: type === "reps" ? target : null,
     defaultSeconds: type === "time" ? target : null,
     defaultSets: Math.min(4, Math.max(2, Number(data.get("sets")) || 3)),
     restSeconds: Math.min(600, Math.max(0, Number(data.get("rest")) || 0)),
-    intensities: ["light", "normal", "hard"],
+    intensities,
     foundation: false,
     enabled: true,
     builtIn: false,
@@ -1213,6 +1262,17 @@ document.addEventListener("submit", async (event) => {
     await addEquipment(event.target);
   } else if (event.target.id === "exercise-form") {
     await addExercise(event.target);
+  }
+});
+
+document.addEventListener("change", (event) => {
+  const input = event.target.closest('#exercise-form input[type="checkbox"]');
+  if (!input) {
+    return;
+  }
+  const error = input.form?.querySelector(`[data-choice-error="${input.name}"]`);
+  if (error) {
+    error.hidden = true;
   }
 });
 
