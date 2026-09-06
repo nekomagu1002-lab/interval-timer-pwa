@@ -114,19 +114,23 @@ function exerciseCategory(exercise) {
   return exercise.equipmentType || exercise.equipment?.[0] || "other";
 }
 
-function chooseGroups(candidates, count, workouts, nonce) {
+function chooseGroups(candidates, count, workouts, nonce, intensity) {
   const availableGroups = Object.keys(MUSCLE_GROUPS).filter((groupId) => (
     candidates.some((exercise) => exercise.muscleGroup === groupId)
   ));
 
-  return availableGroups
+  const ranked = availableGroups
     .map((groupId) => ({
       groupId,
       score: recentGroupLoad(groupId, workouts) + hashNumber(`${nonce}-${groupId}`) * 1.25,
     }))
     .sort((a, b) => a.score - b.score)
-    .slice(0, Math.min(count, availableGroups.length))
     .map((entry) => entry.groupId);
+  if (intensity === "light") {
+    return ranked.slice(0, count);
+  }
+  const primary = ["legs", "chest", "back", "core"].filter((id) => availableGroups.includes(id));
+  return [...primary, ...ranked.filter((id) => !primary.includes(id))].slice(0, count);
 }
 
 function latestCompletedItem(exerciseId, workouts) {
@@ -206,7 +210,33 @@ export function estimatePlanMinutes(items) {
   return Math.max(1, Math.round(seconds / 60));
 }
 
-export function generatePlan({ intensity, equipment, exercises, workouts, nonce = Date.now() }) {
+// Keep most of a menu stable and rotate a small number of same-group slots.
+function varySelectedExercises(selected, candidates, workouts, nonce, intensity, reference) {
+  if (intensity === "light") return;
+  const referenceIds = new Set((reference?.items || []).map((item) => item.exerciseId));
+  const targetChanges = intensity === "hard" ? 1 + Math.floor(hashNumber(`${nonce}-variation-count`) * 2) : 1;
+  const changedCount = () => selected.filter((item) => !referenceIds.has(item.id)).length;
+  const slots = selected.map((item, index) => ({
+    index,
+    // Supplementary slots rotate first; primary movement coverage stays intact.
+    score: (["arms", "shoulders"].includes(item.muscleGroup) ? 0 : 1)
+      + hashNumber(`${nonce}-variation-${item.id}`),
+  })).sort((a, b) => a.score - b.score);
+  let changes = 0;
+  for (const { index } of slots) {
+    if (referenceIds.size ? changedCount() >= targetChanges : changes >= targetChanges) break;
+    const current = selected[index];
+    const excluded = [...selected.map((item) => item.id), ...referenceIds];
+    const replacement = chooseExerciseForGroup(current.muscleGroup, candidates, workouts,
+      `${nonce}-variation`, intensity, excluded);
+    if (replacement) {
+      selected[index] = replacement;
+      changes += 1;
+    }
+  }
+}
+
+export function generatePlan({ intensity, equipment, exercises, workouts, nonce = Date.now(), previousPlan = null }) {
   const config = INTENSITIES[intensity] || INTENSITIES.normal;
   const candidates = exercises.filter((exercise) => (
     isExerciseAvailable(exercise, equipment) && exercise.intensities.includes(config.id)
@@ -216,11 +246,17 @@ export function generatePlan({ intensity, equipment, exercises, workouts, nonce 
     return null;
   }
 
-  const groups = chooseGroups(candidates, config.exerciseCount, workouts, nonce);
+  const groups = chooseGroups(candidates, config.exerciseCount, workouts, nonce, config.id);
   const selected = [];
+  const reference = previousPlan?.intensity === config.id ? previousPlan
+    : config.id === "hard" ? workouts.find((workout) => workout.intensity === "hard") : null;
 
   groups.forEach((groupId) => {
-    const exercise = chooseExerciseForGroup(
+    const previousItem = reference?.items.find((item) => item.muscleGroup === groupId);
+    const retained = config.id !== "light" && candidates.find((item) => (
+      item.id === previousItem?.exerciseId && item.muscleGroup === groupId
+    ));
+    const exercise = retained || chooseExerciseForGroup(
       groupId,
       candidates,
       workouts,
@@ -245,6 +281,9 @@ export function generatePlan({ intensity, equipment, exercises, workouts, nonce 
       .forEach((exercise) => selected.push(exercise));
   }
 
+  if (config.id === "hard" || reference) {
+    varySelectedExercises(selected, candidates, workouts, nonce, config.id, reference);
+  }
   const items = selected.map((exercise) => createPlanItem(exercise, config.id, workouts));
 
   return {

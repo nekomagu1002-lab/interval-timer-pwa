@@ -690,6 +690,7 @@ function renderSettings() {
 async function createPlan(intensity) {
   const plan = generatePlan({
     intensity,
+    previousPlan: state.draftPlan,
     equipment: state.equipment,
     exercises: state.exercises,
     workouts: state.workouts,
