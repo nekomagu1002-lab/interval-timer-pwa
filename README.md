@@ -1,5 +1,14 @@
 # 筋トレ支援PWA
 
+<!-- repository-role:start -->
+> 公開配信用リポジトリです。今後の開発は [app-lab/projects/interval-timer-pwa/](https://github.com/nekomagu1002-lab/app-lab/tree/main/projects/interval-timer-pwa)（非公開・アクセス権が必要）で行います。
+>
+> [アプリを開く](https://nekomagu1002-lab.github.io/interval-timer-pwa/) · [公開中のソース](https://github.com/nekomagu1002-lab/interval-timer-pwa/tree/main)
+>
+> 開発先と公開版は自動同期していません。このリポジトリは既存URLの配信のために残しています。以下は公開版の従来の説明です。開発先にだけ含まれる修正があるため、最新版と一致するとは限りません。
+<!-- repository-role:end -->
+
+
 家にある器具と最近のトレーニング記録をもとに、その日の筋トレメニューを端末内で提案し、セット記録まで完結できる個人用PWAです。生成AI、外部API、アカウント、クラウド同期は使用しません。
 
 バージョン: **v1.0.0**
