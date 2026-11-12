@@ -24,6 +24,7 @@ import {
   replacePlanItem,
 } from "./generator.js";
 import { PreciseCountdown, formatDuration } from "./timer.js";
+import { selectHistory, historyFile } from "./history-export.js";
 
 const VALID_ROUTES = new Set([
   "home",
@@ -53,6 +54,7 @@ const state = {
   equipment: [],
   exercises: [],
   workouts: [],
+  historyExport: { period: "all", start: "", end: "", format: "csv" },
   draftPlan: null,
   activeWorkout: null,
   exerciseFilter: "all",
@@ -669,8 +671,26 @@ function renderSettings() {
       <section class="settings-card">
         <div class="settings-card__heading"><div><p class="eyebrow">MY DATA</p><h2>バックアップ</h2></div></div>
         <p>器具、種目、設定、履歴、進行中の内容をひとつのJSONファイルに保存できます。</p>
-        <div class="settings-actions"><button class="secondary-button" type="button" data-action="export-data">JSONを書き出す</button><button class="secondary-button" type="button" data-action="choose-import">JSONを読み込む</button></div>
+        <div class="settings-actions"><button class="secondary-button" type="button" data-action="export-data">バックアップを書き出す</button><button class="secondary-button" type="button" data-action="choose-import">バックアップから復元</button></div>
         <p class="helper-text">インポートすると、現在の端末内データをバックアップ内容で置き換えます。</p>
+      </section>
+
+      <section class="settings-card">
+        <div class="settings-card__heading"><div><p class="eyebrow">WORKOUT RECORDS</p><h2>筋トレ記録エクスポート</h2></div></div>
+        <p>保存済み履歴の実施済みセットを書き出します。復元用のバックアップとは別のファイルです。</p>
+        <div class="history-export-controls">
+          <label class="field"><span>対象期間</span><select data-history-export="period">
+            ${[["all", "すべて"], ["30", "直近30日"], ["90", "直近90日"], ["custom", "期間を指定"]].map(([value, label]) => `<option value="${value}" ${state.historyExport.period === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select></label>
+          <label class="field"><span>形式</span><select data-history-export="format"><option value="csv" ${state.historyExport.format === "csv" ? "selected" : ""}>CSV（Excel向け）</option><option value="json" ${state.historyExport.format === "json" ? "selected" : ""}>JSON（記録のみ）</option></select></label>
+          <div class="history-export-dates" ${state.historyExport.period === "custom" ? "" : "hidden"}>
+            <label class="field"><span>開始日</span><input type="date" data-history-export="start" value="${escapeHtml(state.historyExport.start)}"></label>
+            <label class="field"><span>終了日</span><input type="date" data-history-export="end" value="${escapeHtml(state.historyExport.end)}"></label>
+          </div>
+        </div>
+        <p id="history-export-count" aria-live="polite">${historyExportSummary()}</p>
+        <button class="primary-button history-export-button" type="button" data-action="export-history" ${historyExportSelection().rows.length ? "" : "disabled"}>記録を書き出す</button>
+        <p class="helper-text">1行＝1セット。直近30日・90日は今日を含み、指定期間は開始日・終了日を含みます。休憩は設定値です。</p>
       </section>
 
       <section class="settings-card settings-links">
@@ -1085,6 +1105,32 @@ async function exportData() {
   showToast("バックアップを書き出しました");
 }
 
+function historyExportSelection() {
+  return selectHistory(state.workouts, state.equipment, state.historyExport);
+}
+
+function historyExportSummary() {
+  const selection = historyExportSelection();
+  return selection.range.error || `対象：${selection.workoutCount}回のトレーニング・${selection.exerciseCount}種目・${selection.rows.length}セット`;
+}
+
+function exportHistory() {
+  try {
+    const file = historyFile(historyExportSelection(), state.historyExport.format);
+    const url = URL.createObjectURL(new Blob([file.content], { type: file.type }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = file.name;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast("筋トレ記録を書き出しました");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function validateImport(payload) {
   const data = payload?.data;
   return payload?.app === "my-training-pwa"
@@ -1305,6 +1351,7 @@ document.addEventListener("click", async (event) => {
     "set-sound": () => setSound(button),
     "preview-sound": previewSound,
     "export-data": exportData,
+    "export-history": exportHistory,
     "choose-import": () => elements.importFile.click(),
     "adjust-interval-setting": () => adjustIntervalSetting(button),
     "interval-start": startInterval,
@@ -1328,6 +1375,14 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const exportKey = event.target.dataset.historyExport;
+  if (exportKey && Object.hasOwn(state.historyExport, exportKey)) {
+    state.historyExport[exportKey] = event.target.value;
+    document.querySelector(".history-export-dates").hidden = state.historyExport.period !== "custom";
+    document.querySelector("#history-export-count").textContent = historyExportSummary();
+    document.querySelector('[data-action="export-history"]').disabled = !historyExportSelection().rows.length;
+    return;
+  }
   const input = event.target.closest('#exercise-form input[type="checkbox"]');
   if (!input) {
     return;
