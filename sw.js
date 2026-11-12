@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "my-training-pwa-v1.0.0-r5";
+const CACHE_NAME = "my-training-pwa-v1.0.0-r6";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -11,6 +11,7 @@ const APP_SHELL = [
   "./js/data.js",
   "./js/db.js",
   "./js/generator.js",
+  "./js/history-export.js",
   "./js/timer.js",
   "./assets/icons/icon.svg",
   "./assets/icons/apple-touch-icon-180.png",
